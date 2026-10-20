@@ -18,6 +18,28 @@ running the benchmark, the queries, and the results.
 
 ## Adapter function
 
+### Runs without reference labels
+
+`quail_b.run(..., accuracy=False)` validates and saves engine outputs without
+loading reference labels. Its accuracy metrics, reference model, and collection
+ID are null. Available time, token, and cost metrics remain active. This mode
+does not relax result schemas, document IDs, label choices, or answer consistency.
+
+For this fork's pending TripAdvisor queries, pass `corpus_manifest` and select
+the query IDs explicitly. The loader validates all input tables and metadata
+against the local manifest before calling the engine. It records no published
+scale factor for this custom corpus. Reference-label attachment is not yet
+supported for TripAdvisor; `accuracy=True` fails explicitly.
+
+TripAdvisor runs copy their prepared inputs to `inputs/` in the output directory.
+`run.json` stores the relative manifest path and accuracy mode. Rescoring uses
+that snapshot and requires matching corpus and query identities. The optional
+`report(..., corpus_manifest=...)` override must identify the same corpus.
+
+Existing records without these optional fields keep their published-corpus
+behavior and enabled accuracy. Token minimums remain per-query; this extension
+does not introduce a session-wide cache metric.
+
 ```python
 def run_query(
     query: quail_b.QuerySpec,
@@ -458,8 +480,9 @@ filter stores its boolean `answer`. The manifest's predicate lists the
 
 A query marked `labels_pending` in the catalog has no published labels yet.
 `quail_b.queries()` leaves it out; `queries(include_pending=True)` and
-`get_query` return it. Running one needs a label collection that includes its
-predicates, passed with `root` or `collection_id`. No query is pending.
+`get_query` return it. The four TripAdvisor queries are pending. Run them with
+a prepared local `corpus_manifest` and `accuracy=False`. Their reference-label
+attachment is not yet supported.
 
 ## Measurements
 

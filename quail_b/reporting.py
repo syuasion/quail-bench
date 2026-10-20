@@ -13,6 +13,7 @@ import pyarrow.parquet as pq
 
 from quail_b._files import download_cache
 from quail_b.benchmark import load_benchmark
+from quail_b.data import build_tripadvisor
 from quail_b.run import (
     RUN_SCHEMA_VERSION,
     _query_hash,
@@ -91,9 +92,10 @@ def measurement_rows(record) -> list[dict]:
         if item.get("status") != "complete":
             continue
         metrics = item["metrics"]
-        answers = metrics["accuracy"]["answer_accuracy"] or {}
-        labels = metrics["accuracy"].get("label_accuracy") or {}
-        output = metrics["accuracy"]["output_accuracy"]
+        accuracy = metrics.get("accuracy") or {}
+        answers = accuracy.get("answer_accuracy") or {}
+        labels = accuracy.get("label_accuracy") or {}
+        output = accuracy.get("output_accuracy") or {}
         rows.append({
             "query": item["id"],
             "runtime_s": item["runtime_s"],
@@ -109,7 +111,8 @@ def measurement_rows(record) -> list[dict]:
             "answers_correct": answers.get("correct"),
             "labels_evaluated": labels.get("evaluated"),
             "labels_correct": labels.get("correct"),
-            "predicted_rows": output.get("predicted_rows"),
+            "predicted_rows": output.get(
+                "predicted_rows", metrics.get("returned_rows")),
             "expected_rows": output.get("expected_rows"),
             "matching_rows": output.get("matching_rows"),
             "cost_usd": metrics["cost_usd"],
@@ -133,13 +136,16 @@ def _number(value):
 
 
 def _write_report(directory, record):
+    scale = record["scale_factor"]
     lines = [
         "# QUAIL-B results", "",
         f"Status: {record['status']}", "",
-        f"Scale factor: {record['scale_factor']}", "",
+        f"Scale factor: {scale if scale is not None else 'not applicable'}", "",
         f"Corpus: {record['corpus_id']}", "",
-        f"Reference collection: {record['collection_id']}", "",
-        f"Reference model: {record['reference_model']}", "",
+        f"Reference collection: {record['collection_id'] or 'unavailable'}", "",
+        f"Reference model: {record['reference_model'] or 'unavailable'}", "",
+        ("Accuracy: enabled." if record.get("accuracy_enabled", True)
+         else "Accuracy: unavailable; reference agreement was disabled."), "",
         "Query duration excludes model startup, result collection, scoring, "
         "and result saving.", "",
         "Predicate accuracy is agreement on evaluated answers. Engines may "
@@ -169,7 +175,7 @@ def _write_report(directory, record):
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ])
     for item in record["queries"]:
-        accuracy = item.get("metrics", {}).get("accuracy", {})
+        accuracy = item.get("metrics", {}).get("accuracy") or {}
         answers = accuracy.get("answer_accuracy") or {}
         labels = accuracy.get("label_accuracy") or {}
         output = accuracy.get("output_accuracy", {})
@@ -218,7 +224,8 @@ def _query_directory(directory, item):
     return path
 
 
-def report(run_dir, *, rescore=True, cache_dir=None, root=None):
+def report(run_dir, *, rescore=True, cache_dir=None, root=None,
+           corpus_manifest=None):
     """Write a report, optionally reusing scores already saved in the run."""
     directory = Path(run_dir)
     path = directory / "run.json"
@@ -228,10 +235,17 @@ def report(run_dir, *, rescore=True, cache_dir=None, root=None):
     if not rescore:
         return _write_report(directory, record)
     ids = [item["id"] for item in record["queries"]]
+    saved_manifest = record.get("corpus_manifest")
+    if corpus_manifest is None and saved_manifest is not None:
+        corpus_manifest = (directory / saved_manifest).resolve()
+        if not corpus_manifest.is_relative_to(directory.resolve()):
+            raise ValueError("corpus manifest is outside the run directory")
     with download_cache(cache_dir):
         suite = load_benchmark(
             ids, scale_factor=record["scale_factor"],
-            collection_id=record["collection_id"], root=root)
+            collection_id=record["collection_id"], root=root,
+            accuracy=record.get("accuracy_enabled", True),
+            corpus_manifest=corpus_manifest)
     if suite.corpus_id != record["corpus_id"]:
         raise ValueError("saved corpus does not match the benchmark")
     for spec, item in zip(suite.queries, record["queries"]):
@@ -247,7 +261,7 @@ def report(run_dir, *, rescore=True, cache_dir=None, root=None):
             if (output.filter_answers is None or output.join_answers is None
                     or (spec.info.classifies
                         and output.classify_answers is None)
-                    or spec.info.relational):
+                    or spec.info.relational or suite.ground_truth is None):
                 output = _read_output(query_directory, item)
             item["metrics"] = _score(
                 spec, output, suite, record["gpu_count"],
@@ -277,5 +291,26 @@ def main():
     command.add_argument("run_dir")
     command.add_argument("--cache-dir")
     command.add_argument("--root", help="optional offline mirror of published data")
+    command.add_argument("--corpus-manifest", help="replacement local corpus path")
+    prepare = commands.add_parser(
+        "prepare-tripadvisor", help="prepare hotel reviews from the original ZIP")
+    prepare.add_argument("output_dir")
+    prepare.add_argument("--archive-path", required=True, help="local review.txt.zip")
+    prepare.add_argument("--pair-mode", choices=("earlier_later", "all_unique_pairs"),
+                         default="earlier_later")
+    prepare.add_argument("--source-sha256", help="expected archive SHA256")
+    prepare.add_argument("--hotel-limit", type=int, default=5)
+    prepare.add_argument("--reviews-per-hotel", type=int, default=20)
+    prepare.add_argument("--seed", type=int, default=0)
+    prepare.add_argument("--max-chars", type=int)
     args = parser.parse_args()
-    print(report(args.run_dir, cache_dir=args.cache_dir, root=args.root))
+    if args.command == "prepare-tripadvisor":
+        manifest = build_tripadvisor(
+            args.output_dir, archive_path=args.archive_path,
+            source_sha256=args.source_sha256, hotel_limit=args.hotel_limit,
+            reviews_per_hotel=args.reviews_per_hotel, seed=args.seed,
+            max_chars=args.max_chars, pair_mode=args.pair_mode)
+        print(json.dumps(manifest, indent=2))
+    else:
+        print(report(args.run_dir, cache_dir=args.cache_dir, root=args.root,
+                     corpus_manifest=args.corpus_manifest))

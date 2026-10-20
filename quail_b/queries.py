@@ -190,6 +190,7 @@ QUERY_FAMILY_WORKLOADS = {
     "LEP": "lepard",
     "AGENT": "agent",
     "REL": "relational",
+    "TA": "tripadvisor",
 }
 
 
@@ -200,8 +201,7 @@ def queries(include_privacy: bool = False,
     Args:
         include_privacy: Also return the privacy policy queries.
         include_pending: Also return queries whose reference labels are
-            not published yet. They run only against a label collection
-            that includes their predicates.
+            not published yet. Accuracy requires a matching collection.
     """
     regular, privacy, pending = _load_queries()
     specs = (regular + (privacy if include_privacy else ())

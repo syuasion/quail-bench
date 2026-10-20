@@ -258,5 +258,29 @@
     "id": "PRIV-2",
     "description": "2 filters + 1 join: P_MSG + P_LOC -> scenarios",
     "privacy": true
+  },
+  {
+    "id": "TA-1",
+    "description": "TA_1_1 -> TA_1_2, 2 filters",
+    "privacy": false,
+    "labels_pending": true
+  },
+  {
+    "id": "TA-2",
+    "description": "classify: the department responsible for each complaint",
+    "privacy": false,
+    "labels_pending": true
+  },
+  {
+    "id": "TA-3",
+    "description": "two TA_3_1 complaint filters -> TA_3 join: unique same-hotel pairs report the same problem",
+    "privacy": false,
+    "labels_pending": true
+  },
+  {
+    "id": "REL-TA-1",
+    "description": "REL_TA_1 score: top 10 reviews",
+    "privacy": false,
+    "labels_pending": true
   }
 ]

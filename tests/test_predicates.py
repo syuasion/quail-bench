@@ -3,7 +3,10 @@
 from dataclasses import replace
 
 from quail_b.predicates import (
+    PREDICATE_BY_KEY,
     PREDICATES,
+    TRIPADVISOR_PREDICATES,
+    WORKLOADS,
     example_identity,
     judgment_identity,
     label_set_identity,
@@ -97,3 +100,17 @@ def test_raw_join_restores_the_published_predicate_hash():
 
     spec = _spec("quailb.imdb.review.discusses_aspect")
     assert predicate_version(spec)[0] == "pv_7fd88f0450b6e15acbae8810ef0405ae"
+
+
+def test_tripadvisor_pending_specs_do_not_expand_published_labels():
+    assert len(PREDICATES) == 23
+    assert "tripadvisor" not in WORKLOADS
+    assert len(TRIPADVISOR_PREDICATES) == 5
+    assert all(spec not in PREDICATES for spec in TRIPADVISOR_PREDICATES)
+    assert all(PREDICATE_BY_KEY[spec.key] is spec
+               for spec in TRIPADVISOR_PREDICATES)
+    assert len({predicate_version(spec)[0] for spec in TRIPADVISOR_PREDICATES}) == 5
+    join = PREDICATE_BY_KEY["quailb.tripadvisor.pair.same_problem"]
+    text = render_join_prompt(join, "earlier", "later")
+    assert text.startswith("DOCUMENT:\nearlier")
+    assert "DOCUMENT {1}:\nlater" in text

@@ -1,0 +1,210 @@
+{
+  "extension_urns": [
+    {
+      "extension_urn_anchor": 1,
+      "urn": "extension:org.fsdatalab.quail_b:functions_ai"
+    }
+  ],
+  "extensions": [
+    {
+      "extension_function": {
+        "extension_urn_reference": 1,
+        "function_anchor": 7,
+        "name": "ai_score:str_str"
+      }
+    }
+  ],
+  "relations": [
+    {
+      "root": {
+        "input": {
+          "project": {
+            "common": {
+              "emit": {
+                "output_mapping": [
+                  4,
+                  5
+                ]
+              }
+            },
+            "expressions": [
+              {
+                "selection": {
+                  "direct_reference": {
+                    "struct_field": {}
+                  },
+                  "root_reference": {}
+                }
+              },
+              {
+                "selection": {
+                  "direct_reference": {
+                    "struct_field": {
+                      "field": 3
+                    }
+                  },
+                  "root_reference": {}
+                }
+              }
+            ],
+            "input": {
+              "fetch": {
+                "common": {
+                  "direct": {},
+                  "hint": {
+                    "alias": "fetch-1"
+                  }
+                },
+                "count_expr": {
+                  "literal": {
+                    "i64": "10"
+                  }
+                },
+                "input": {
+                  "sort": {
+                    "common": {
+                      "direct": {},
+                      "hint": {
+                        "alias": "sort-1"
+                      }
+                    },
+                    "input": {
+                      "project": {
+                        "common": {
+                          "direct": {},
+                          "hint": {
+                            "alias": "score-1",
+                            "output_names": [
+                              "r.id",
+                              "r.body",
+                              "r.hotel_id",
+                              "r.forced_move_score"
+                            ]
+                          }
+                        },
+                        "expressions": [
+                          {
+                            "scalar_function": {
+                              "arguments": [
+                                {
+                                  "value": {
+                                    "literal": {
+                                      "string": "Judge strictly from the review above whether a hotel problem forced the guest to change rooms, leave early, or move to another hotel. \n\n{0}\n\nInstruction: answer TRUE only if the review reports that this happened, FALSE otherwise."
+                                    }
+                                  }
+                                },
+                                {
+                                  "value": {
+                                    "selection": {
+                                      "direct_reference": {
+                                        "struct_field": {
+                                          "field": 1
+                                        }
+                                      },
+                                      "root_reference": {}
+                                    }
+                                  }
+                                }
+                              ],
+                              "function_reference": 7,
+                              "output_type": {
+                                "fp64": {
+                                  "nullability": "NULLABILITY_REQUIRED"
+                                }
+                              }
+                            }
+                          }
+                        ],
+                        "input": {
+                          "read": {
+                            "base_schema": {
+                              "names": [
+                                "id",
+                                "body",
+                                "hotel_id"
+                              ],
+                              "struct": {
+                                "nullability": "NULLABILITY_REQUIRED",
+                                "types": [
+                                  {
+                                    "string": {
+                                      "nullability": "NULLABILITY_REQUIRED"
+                                    }
+                                  },
+                                  {
+                                    "string": {
+                                      "nullability": "NULLABILITY_REQUIRED"
+                                    }
+                                  },
+                                  {
+                                    "string": {
+                                      "nullability": "NULLABILITY_REQUIRED"
+                                    }
+                                  }
+                                ]
+                              }
+                            },
+                            "common": {
+                              "direct": {},
+                              "hint": {
+                                "alias": "r"
+                              }
+                            },
+                            "named_table": {
+                              "names": [
+                                "tripadvisor_reviews"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "sorts": [
+                      {
+                        "direction": "SORT_DIRECTION_DESC_NULLS_LAST",
+                        "expr": {
+                          "selection": {
+                            "direct_reference": {
+                              "struct_field": {
+                                "field": 3
+                              }
+                            },
+                            "root_reference": {}
+                          }
+                        }
+                      },
+                      {
+                        "direction": "SORT_DIRECTION_ASC_NULLS_LAST",
+                        "expr": {
+                          "selection": {
+                            "direct_reference": {
+                              "struct_field": {}
+                            },
+                            "root_reference": {}
+                          }
+                        }
+                      }
+                    ]
+                  }
+                },
+                "offset_expr": {
+                  "literal": {
+                    "i64": "0"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "names": [
+          "r",
+          "forced_move_score"
+        ]
+      }
+    }
+  ],
+  "version": {
+    "minor_number": 103,
+    "producer": "quail-b"
+  }
+}

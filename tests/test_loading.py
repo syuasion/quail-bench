@@ -44,6 +44,37 @@ def test_load_table_and_query(tmp_path):
         benchmark.get_query("UNKNOWN")
 
 
+def test_tripadvisor_loader_uses_checked_local_inputs(
+        tripadvisor_corpus, monkeypatch):
+    from quail_b import benchmark as loading
+
+    def unexpected_published_read(*args, **kwargs):
+        raise AssertionError("local corpus must not read published manifests")
+
+    monkeypatch.setattr(loading, "_read_json", unexpected_published_read)
+    suite = loading.load_benchmark(
+        ["TA-3"], corpus_manifest=tripadvisor_corpus, accuracy=False)
+    assert suite.scale_factor is None
+    assert suite.ground_truth is None
+    assert set(suite.tables) == {"tripadvisor_pair_left", "tripadvisor_pair_right"}
+    assert all(table.column_names == ["id", "pair_id", "review_id", "hotel_id", "body"]
+               for table in suite.tables.values())
+    for kwargs, message in [
+        ({}, "reference labels are pending"),
+        ({"accuracy": False, "data_dir": tripadvisor_corpus.parent},
+         "without data_dir"),
+        ({"accuracy": False, "collection_id": "unrelated"}, "no reference"),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            loading.load_benchmark("TA-1", corpus_manifest=tripadvisor_corpus,
+                                   **kwargs)
+    with pytest.raises(ValueError, match="explicitly"):
+        loading.load_benchmark(corpus_manifest=tripadvisor_corpus, accuracy=False)
+    with pytest.raises(ValueError, match="do not match"):
+        loading.load_benchmark("IMDB-1", corpus_manifest=tripadvisor_corpus,
+                               accuracy=False)
+
+
 def test_public_s3_and_local_reads(monkeypatch, tmp_path):
     bucket = tmp_path / "quail-bench"
     directory = bucket / "labels"

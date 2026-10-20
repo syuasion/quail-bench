@@ -32,7 +32,8 @@ CLASSIFY_QUERIES = ("IMDB-11", "IMDB-12", "IMDB-13", "IMDB-14", "IMDB-15",
 
 
 def test_classification_queries_are_published():
-    assert pending_query_ids() == ()
+    assert pending_query_ids() == (
+        "TA-1", "TA-2", "TA-3", "REL-TA-1")
     assert tuple(query_id for query_id, spec in queries().items()
                  if spec.info.classifies) == CLASSIFY_QUERIES
 
@@ -47,9 +48,12 @@ def test_agent_5_classifies_each_trace_three_ways():
 
 
 def test_every_classification_has_one_predicate():
+    specs = predicates.CLASSIFY_PREDICATES + tuple(
+        spec for spec in predicates.TRIPADVISOR_PREDICATES
+        if spec.kind == "classify")
     by_template = {
-        spec.template: spec for spec in predicates.CLASSIFY_PREDICATES}
-    assert len(by_template) == len(predicates.CLASSIFY_PREDICATES)
+        spec.template: spec for spec in specs}
+    assert len(by_template) == len(specs)
     used = set()
     for query_id in CLASSIFY_QUERIES + pending_query_ids():
         for operator in quail_b.get_query(query_id).info.classifies:
@@ -57,7 +61,19 @@ def test_every_classification_has_one_predicate():
             assert spec.labels == operator.labels
             assert predicates._descriptions(spec) == operator.descriptions
             used.add(spec.key)
-    assert used == {spec.key for spec in predicates.CLASSIFY_PREDICATES}
+    assert used == {spec.key for spec in specs}
+
+
+def test_tripadvisor_department_policy_keeps_manual_and_no_action():
+    operator = quail_b.get_query("TA-2").info.classifies[0]
+    assert operator.labels == prompts.TA_2_LABELS
+    assert operator.descriptions == prompts.TA_2_DESCRIPTIONS
+    assert operator.labels == (
+        "housekeeping", "maintenance", "front_desk", "billing",
+        "manual_review", "no_action")
+    assert operator.partner is None
+    assert "multiple departments" in operator.descriptions[4]
+    assert "external conditions" in operator.descriptions[5]
 
 
 def test_plans_carry_label_columns_and_filters():

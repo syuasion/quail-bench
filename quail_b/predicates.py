@@ -199,7 +199,36 @@ CLASSIFY_PREDICATES = (
         descriptions=prompts.AGENT_ROOT_CAUSE_DESCRIPTIONS),
 )
 
-PREDICATE_BY_KEY = {p.key: p for p in PREDICATES + CLASSIFY_PREDICATES}
+# Pending predicates do not extend the published reference-label contract.
+TRIPADVISOR_PREDICATES = (
+    PredicateSpec(
+        "quailb.tripadvisor.review.problem", "tripadvisor", "review_problem",
+        "filter", prompts.TA_1_1, "review", "tripadvisor_reviews", "body",
+        source_policy="pending"),
+    PredicateSpec(
+        "quailb.tripadvisor.review.unresolved_help", "tripadvisor",
+        "review_unresolved_help", "filter", prompts.TA_1_2,
+        "review", "tripadvisor_reviews", "body", source_policy="pending"),
+    PredicateSpec(
+        "quailb.tripadvisor.review.department", "tripadvisor",
+        "review_department", "classify", prompts.TA_2,
+        "review", "tripadvisor_reviews", "body", source_policy="pending",
+        labels=prompts.TA_2_LABELS,
+        descriptions=prompts.TA_2_DESCRIPTIONS),
+    PredicateSpec(
+        "quailb.tripadvisor.pair.same_problem", "tripadvisor",
+        "pair_same_problem", "join", prompts.TA_3,
+        "review_a", "tripadvisor_pair_left", "body",
+        "review_b", "tripadvisor_pair_right", "body", source_policy="pending"),
+    PredicateSpec(
+        "quailb.tripadvisor.review.forced_move", "tripadvisor",
+        "review_forced_move", "filter", prompts.REL_TA_1,
+        "review", "tripadvisor_reviews", "body", source_policy="pending"),
+)
+
+PREDICATE_BY_KEY = {
+    p.key: p for p in PREDICATES + CLASSIFY_PREDICATES + TRIPADVISOR_PREDICATES
+}
 
 WORKLOADS = tuple(dict.fromkeys(spec.workload for spec in PREDICATES))
 

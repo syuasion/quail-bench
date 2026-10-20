@@ -8,8 +8,15 @@ scale factor names one exact corpus.
 
 import hashlib
 import heapq
+import io
 import json
+import re
+from collections import Counter, defaultdict
+from datetime import datetime
+from functools import lru_cache
+from itertools import combinations
 from pathlib import Path
+from zipfile import ZipFile
 
 import numpy as np
 import pyarrow as pa
@@ -1016,3 +1023,465 @@ def load_table(name: str, *, scale_factor: float = 0.1,
     table = (pq.read_table(cached) if cached is not None else
              pq.read_table(source, filesystem=filesystem))
     return table if limit is None else table.slice(0, limit)
+
+
+# Local inputs stay separate from the original published corpus identities.
+TRIPADVISOR_COLUMNS = {
+    name: ("id", "hotel_id", "body") for name in (
+        "tripadvisor_reviews", "tripadvisor_earlier", "tripadvisor_later")
+}
+TRIPADVISOR_PAIR_COLUMNS = {
+    f"tripadvisor_pair_{side}": ("id", "pair_id", "review_id", "hotel_id", "body")
+    for side in ("left", "right")
+}
+TRIPADVISOR_SOURCE_URL = "https://www.cs.cmu.edu/~jiweil/review.txt.zip"
+TRIPADVISOR_SOURCE_SHA256 = (
+    "a43302098170a6c0c086970077dc8a2fce466d431b3c9d9d80ef9565bb057d8d"
+)
+TRIPADVISOR_SCHEMA_VERSION = 1
+TRIPADVISOR_MONTHS = {
+    name: index for index, name in enumerate((
+        "january", "february", "march", "april", "may", "june",
+        "july", "august", "september", "october", "november", "december",
+    ), 1)
+}
+
+
+def tripadvisor_pair_tables(reviews: pa.Table) -> dict[str, pa.Table]:
+    """Prepare each same-hotel unordered pair once, without changing reviews.
+
+    Both endpoint tables have one row per pair. Their shared ``pair_id``
+    supports an ordinary equality join before the AI predicate. Review IDs
+    and hotel IDs are sorted lexicographically, so source row order does not
+    affect endpoint IDs or Arrow output. Bodies remain the exact input text.
+    """
+    rows = reviews.select(["id", "hotel_id", "body"]).to_pylist()
+    by_hotel = {}
+    seen_ids = set()
+    for row in rows:
+        review_id = row["id"]
+        if review_id in seen_ids:
+            raise ValueError(f"duplicate TripAdvisor review ID: {review_id!r}")
+        seen_ids.add(review_id)
+        by_hotel.setdefault(row["hotel_id"], []).append(row)
+    endpoints = {"left": [], "right": []}
+    for hotel in sorted(by_hotel):
+        ordered = sorted(by_hotel[hotel], key=lambda row: row["id"])
+        for left, right in combinations(ordered, 2):
+            pair_id = json.dumps([left["id"], right["id"]],
+                                 separators=(",", ":"))
+            for side, review in (("left", left), ("right", right)):
+                endpoints[side].append({
+                    "id": f"{side}:{pair_id}", "pair_id": pair_id,
+                    "review_id": review["id"], "hotel_id": hotel,
+                    "body": review["body"],
+                })
+    schema = pa.schema([(name, pa.string()) for name in (
+        "id", "pair_id", "review_id", "hotel_id", "body")])
+    return {f"tripadvisor_pair_{side}": pa.Table.from_pylist(rows, schema=schema)
+            for side, rows in endpoints.items()}
+
+
+def _tripadvisor_settings(hotel_limit, reviews_per_hotel, seed, max_chars,
+                         pair_mode="earlier_later"):
+    for name, value, minimum in (("hotel_limit", hotel_limit, 1),
+                                 ("reviews_per_hotel", reviews_per_hotel, 2)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise ValueError(f"{name} must be an integer of at least {minimum}")
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError("seed must be an integer")
+    if max_chars is not None and (
+            isinstance(max_chars, bool) or not isinstance(max_chars, int)
+            or max_chars < 1):
+        raise ValueError("max_chars must be a positive integer or None")
+    if pair_mode not in ("earlier_later", "all_unique_pairs"):
+        raise ValueError("pair_mode must be earlier_later or all_unique_pairs")
+    settings = {
+        "hotel_limit": hotel_limit, "reviews_per_hotel": reviews_per_hotel,
+        "seed": seed, "max_chars": max_chars,
+        "sampling": "seeded-hotel-and-cohort-hash-v1",
+        "partition": "strict-median-date-v1", "text_format": "title-text-v1",
+    }
+    if pair_mode != "earlier_later":
+        settings["pair_mode"] = pair_mode
+    return settings
+
+
+def _tripadvisor_id(value):
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError("TripAdvisor IDs must be positive decimal integers")
+    text = str(value)
+    if re.fullmatch(r"[1-9][0-9]*", text) is None:
+        raise ValueError("TripAdvisor IDs must be canonical positive decimals")
+    return text
+
+
+@lru_cache(maxsize=40_000)
+def _tripadvisor_date(value):
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    # The release uses English months regardless of the host's LC_TIME.
+    match = re.fullmatch(r"([A-Za-z]+)\s+(\d{1,2}),\s+(\d{4})", value)
+    if match is not None:
+        month = TRIPADVISOR_MONTHS.get(match[1].lower())
+        if month is None:
+            return None
+        value = f"{match[3]}-{month:02d}-{int(match[2]):02d}"
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        return None
+
+
+def _tripadvisor_row(row):
+    if not isinstance(row, dict):
+        raise ValueError("TripAdvisor source rows must be dictionaries")
+    review_id = _tripadvisor_id(row.get("id"))
+    hotel_id = _tripadvisor_id(row.get("offering_id"))
+    text = row.get("text")
+    date = row.get("date")
+    posted = _tripadvisor_date(date) if isinstance(date, str) else None
+    if not isinstance(text, str) or not text.strip() or posted is None:
+        return None
+    title = row.get("title") or ""
+    if not isinstance(title, str):
+        raise ValueError("TripAdvisor titles must be strings")
+    body = "\n\n".join(part.strip() for part in (title, text) if part.strip())
+    return {"id": review_id, "hotel_id": hotel_id, "body": body,
+            "post_date": posted, "source_review": row}
+
+
+def _tripadvisor_archive_rows(path):
+    with ZipFile(path) as archive:
+        if archive.namelist().count("review.txt") != 1:
+            raise ValueError("TripAdvisor ZIP requires one review.txt member")
+        with archive.open("review.txt") as stream:
+            for line in io.TextIOWrapper(stream, encoding="utf-8"):
+                if line.strip():
+                    yield json.loads(line)
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _tripadvisor_table_identity(table):
+    return {
+        "columns": table.column_names, "rows": table.num_rows,
+        "ordered_rows_full_hash": _full_hash(
+            [_full_hash(row) for row in table.to_pylist()]),
+    }
+
+
+def _tripadvisor_manifest_identity(payload):
+    full_hash = _full_hash(payload)
+    return {**payload, "corpus_id": f"c_{full_hash[:32]}",
+            "corpus_full_hash": full_hash}
+
+
+def _tripadvisor_cutoff(dates, earlier_count, later_count):
+    total, cumulative, choices = sum(dates.values()), 0, []
+    for date, count in sorted(dates.items()):
+        cumulative += count
+        if cumulative >= earlier_count and total - cumulative >= later_count:
+            choices.append((abs(total - 2 * cumulative), date))
+    return min(choices)[1] if choices else None
+
+
+def build_tripadvisor(output_dir, *, archive_path=None, rows=None, hotel_limit=5,
+                      reviews_per_hotel=20, seed=0, max_chars=None,
+                      source_sha256=None, pair_mode="earlier_later"):
+    """Prepare a stable hotel sample and strictly dated review cohorts.
+
+    Args:
+        output_dir: Empty destination for Parquet tables and provenance.
+        archive_path: Local original JSON-lines ZIP, or None for fixture rows.
+        rows: Raw source dictionaries, mutually exclusive with archive_path.
+        hotel_limit: Number of eligible hotels to select.
+        reviews_per_hotel: Reviews per hotel, at least two.
+        seed: Seed for stable hotel and within-cohort hash ordering.
+        max_chars: Explicit body limit, or None to retain full text.
+        source_sha256: Expected archive or canonical fixture SHA256, if given.
+        pair_mode: Earlier/later pairs, or prepared all_unique_pairs endpoints.
+
+    Returns:
+        The content-addressed preparation manifest.
+    """
+    settings = _tripadvisor_settings(
+        hotel_limit, reviews_per_hotel, seed, max_chars, pair_mode)
+    if (archive_path is None) == (rows is None):
+        raise ValueError("provide exactly one of archive_path or rows")
+    directory = Path(output_dir)
+    if directory.exists() and any(directory.iterdir()):
+        raise FileExistsError(f"TripAdvisor directory is not empty: {directory}")
+    if archive_path is not None:
+        source_hash = _file_sha256(archive_path)
+        expected = (TRIPADVISOR_SOURCE_SHA256 if source_sha256 is None
+                    else source_sha256)
+        if expected is None:
+            raise ValueError("the original archive requires a source SHA256 pin")
+        mode = "local_zip"
+    else:
+        provided = list(rows)
+        source_hash = _full_hash(sorted(provided, key=_canonical))
+        expected = source_hash if source_sha256 is None else source_sha256
+        mode = "provided_rows"
+    if (not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected)
+            is None or source_hash != expected):
+        raise ValueError("TripAdvisor source does not match its SHA256 pin")
+    def factory():
+        return (_tripadvisor_archive_rows(archive_path) if mode == "local_zip"
+                else iter(provided))
+
+    counts = Counter(source_reviews=0, excluded_text_or_date=0)
+    dates = defaultdict(Counter)
+    seen = set()
+    for raw in factory():
+        counts["source_reviews"] += 1
+        row = _tripadvisor_row(raw)
+        review_id = _tripadvisor_id(raw.get("id"))
+        if review_id in seen:
+            raise ValueError(f"duplicate TripAdvisor review ID {review_id}")
+        seen.add(review_id)
+        if row is None:
+            counts["excluded_text_or_date"] += 1
+        else:
+            dates[row["hotel_id"]][row["post_date"]] += 1
+    earlier_count = reviews_per_hotel // 2
+    later_count = reviews_per_hotel - earlier_count
+    cutoffs = {hotel: _tripadvisor_cutoff(values, earlier_count, later_count)
+               for hotel, values in dates.items()}
+    eligible = [hotel for hotel, cutoff in cutoffs.items() if cutoff is not None]
+    ordered = sorted(eligible, key=lambda hotel: (_full_hash([seed, hotel]), hotel))
+    if len(ordered) < hotel_limit:
+        raise ValueError("not enough hotels with the required dated review cohorts")
+    hotels = ordered[:hotel_limit]
+    selected = {(hotel, cohort): [] for hotel in hotels
+                for cohort in ("earlier", "later")}
+    for raw in factory():
+        hotel = _tripadvisor_id(raw.get("offering_id"))
+        if hotel not in hotels:
+            continue
+        row = _tripadvisor_row(raw)
+        if row is None:
+            continue
+        cohort = "earlier" if row["post_date"] <= cutoffs[hotel] else "later"
+        limit = earlier_count if cohort == "earlier" else later_count
+        rank = int(_full_hash([seed, hotel, row["id"]]), 16)
+        item = (-rank, row["id"], row)
+        heap = selected[(hotel, cohort)]
+        if len(heap) < limit:
+            heapq.heappush(heap, item)
+        elif item[:2] > heap[0][:2]:
+            heapq.heapreplace(heap, item)
+    records = {name: [] for name in TRIPADVISOR_COLUMNS}
+    metadata = {"hotels": [{"hotel_id": hotel, "cutoff_date": cutoffs[hotel]}
+                           for hotel in hotels], "reviews": []}
+    truncated = 0
+    for hotel in hotels:
+        for cohort in ("earlier", "later"):
+            sampled = [item[2] for item in selected[(hotel, cohort)]]
+            sampled.sort(key=lambda row: (row["post_date"], row["id"]))
+            for row in sampled:
+                original = row["body"]
+                body = original if max_chars is None else original[:max_chars]
+                truncated += int(len(body) < len(original))
+                document = {"id": row["id"], "hotel_id": hotel, "body": body}
+                records["tripadvisor_reviews"].append(document)
+                records[f"tripadvisor_{cohort}"].append(document)
+                metadata["reviews"].append({
+                    "id": row["id"], "hotel_id": hotel,
+                    "post_date": row["post_date"], "cohort": cohort,
+                    "original_chars": len(original),
+                    "original_body_hash": _full_hash(original),
+                    "source_review": row["source_review"],
+                })
+    counts.update(
+        eligible_hotels=len(eligible), hotels=len(hotels),
+        reviews=len(records["tripadvisor_reviews"]),
+        earlier=len(records["tripadvisor_earlier"]),
+        later=len(records["tripadvisor_later"]),
+        same_hotel_pairs=len(hotels) * earlier_count * later_count,
+        truncated_reviews=truncated)
+    tables = {name: pa.Table.from_pylist(records[name], schema=pa.schema(
+        [(column, pa.string()) for column in columns]))
+        for name, columns in TRIPADVISOR_COLUMNS.items()}
+    if pair_mode == "all_unique_pairs":
+        tables.update(tripadvisor_pair_tables(tables["tripadvisor_reviews"]))
+        counts["earlier_later_pairs"] = counts["same_hotel_pairs"]
+        counts["same_hotel_pairs"] = len(tables["tripadvisor_pair_left"])
+    manifest = _tripadvisor_manifest_identity({
+        "schema_version": TRIPADVISOR_SCHEMA_VERSION,
+        "benchmark": "quailb-tripadvisor", "dataset": "tripadvisor",
+        "source": {"url": TRIPADVISOR_SOURCE_URL, "sha256": source_hash,
+                   "mode": mode, "format": "tripadvisor-jsonl-zip-v1"},
+        "settings": settings, "counts": dict(counts),
+        "tables": {name: _tripadvisor_table_identity(table)
+                   for name, table in tables.items()},
+        "metadata": {"file": "metadata.json", "full_hash": _full_hash(metadata)},
+    })
+    directory.mkdir(parents=True, exist_ok=True)
+    for name, table in tables.items():
+        pq.write_table(table, directory / f"{name}.parquet", compression="zstd")
+    for name, value in (("metadata.json", metadata), ("manifest.json", manifest)):
+        (directory / name).write_text(json.dumps(value, indent=2, allow_nan=False))
+    read_tripadvisor_manifest(directory)
+    return manifest
+
+
+def read_tripadvisor_manifest(path):
+    """Validate the corpus hashes, source identities, and strictly dated cohorts."""
+    path = Path(path)
+    path = path / "manifest.json" if path.is_dir() else path
+    manifest = json.loads(path.read_text())
+    if (not isinstance(manifest, dict)
+            or isinstance(manifest.get("schema_version"), bool)
+            or manifest.get("schema_version") != TRIPADVISOR_SCHEMA_VERSION
+            or manifest.get("benchmark") != "quailb-tripadvisor"
+            or manifest.get("dataset") != "tripadvisor"):
+        raise ValueError("unsupported TripAdvisor corpus manifest")
+    payload = {key: value for key, value in manifest.items()
+               if key not in ("corpus_id", "corpus_full_hash")}
+    if _tripadvisor_manifest_identity(payload) != manifest:
+        raise ValueError("TripAdvisor corpus identity does not match its manifest")
+    for section, fields in (
+            ("source", ("url", "sha256", "mode", "format")),
+            ("settings", ("hotel_limit", "reviews_per_hotel", "seed", "max_chars")),
+            ("counts", ("source_reviews", "excluded_text_or_date", "eligible_hotels")),
+            ("tables", tuple(TRIPADVISOR_COLUMNS)),
+            ("metadata", ("file", "full_hash"))):
+        value = manifest.get(section)
+        if not isinstance(value, dict) or not set(fields).issubset(value):
+            raise ValueError(f"malformed TripAdvisor manifest section: {section}")
+    source, settings = manifest["source"], manifest["settings"]
+    expected = _tripadvisor_settings(
+        settings["hotel_limit"], settings["reviews_per_hotel"],
+        settings["seed"], settings["max_chars"],
+        settings.get("pair_mode", "earlier_later"))
+    if (settings != expected or source.get("url") != TRIPADVISOR_SOURCE_URL
+            or source.get("mode") not in ("local_zip", "provided_rows")
+            or source.get("format") != "tripadvisor-jsonl-zip-v1"
+            or not isinstance(source.get("sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", source["sha256"]) is None):
+        raise ValueError("unsupported TripAdvisor source or preparation settings")
+    all_pairs = settings.get("pair_mode") == "all_unique_pairs"
+    required_columns = {
+        **TRIPADVISOR_COLUMNS,
+        **(TRIPADVISOR_PAIR_COLUMNS if all_pairs else {}),
+    }
+    if set(manifest["tables"]) != set(required_columns):
+        raise ValueError("TripAdvisor input tables do not match its pair mode")
+    tables, indexed = {}, {}
+    for name, columns in required_columns.items():
+        table = pq.read_table(path.parent / f"{name}.parquet")
+        schema = pa.schema([(column, pa.string()) for column in columns])
+        if not table.schema.equals(schema, check_metadata=False):
+            raise ValueError(f"{name} has the wrong TripAdvisor schema")
+        if any(table[column].null_count for column in columns):
+            raise ValueError(f"{name} contains null values")
+        if _tripadvisor_table_identity(table) != manifest["tables"][name]:
+            raise ValueError(f"{name} does not match its TripAdvisor table hash")
+        rows = table.to_pylist()
+        indexed[name] = {row["id"]: row for row in rows}
+        if len(indexed[name]) != len(rows) or not rows:
+            raise ValueError(f"{name} requires nonempty rows with unique IDs")
+        for row in rows:
+            if name in TRIPADVISOR_COLUMNS:
+                _tripadvisor_id(row["id"])
+            else:
+                _tripadvisor_id(row["review_id"])
+            _tripadvisor_id(row["hotel_id"])
+            if not row["body"].strip():
+                raise ValueError(f"{name} contains an empty body")
+        tables[name] = table
+    info = manifest["metadata"]
+    if info.get("file") != "metadata.json":
+        raise ValueError("TripAdvisor metadata must use metadata.json")
+    metadata = json.loads((path.parent / "metadata.json").read_text())
+    if _full_hash(metadata) != info["full_hash"]:
+        raise ValueError("TripAdvisor metadata does not match its hash")
+    try:
+        _validate_tripadvisor_cohorts(indexed, metadata, manifest)
+    except (KeyError, TypeError, AttributeError) as error:
+        raise ValueError("malformed TripAdvisor provenance metadata") from error
+    if all_pairs:
+        derived = tripadvisor_pair_tables(tables["tripadvisor_reviews"])
+        for name, table in derived.items():
+            if not table.equals(tables[name], check_metadata=False):
+                raise ValueError(f"{name} differs from the unique source-review pairs")
+    return manifest, tables
+
+
+def _validate_tripadvisor_cohorts(indexed, metadata, manifest):
+    reviews = indexed["tripadvisor_reviews"]
+    earlier, later = (indexed[f"tripadvisor_{name}"] for name in ("earlier", "later"))
+    if set(earlier) & set(later) or set(earlier) | set(later) != set(reviews):
+        raise ValueError("TripAdvisor cohorts must be disjoint and cover all reviews")
+    for cohort in (earlier, later):
+        if any(row != reviews[review_id] for review_id, row in cohort.items()):
+            raise ValueError("TripAdvisor cohort text or hotel differs from reviews")
+    hotels = {row["hotel_id"] for row in reviews.values()}
+    provenance = metadata["reviews"]
+    if (len(provenance) != len(reviews)
+            or {row["id"] for row in provenance} != set(reviews)):
+        raise ValueError("TripAdvisor provenance has different review IDs")
+    boundaries = {row["hotel_id"]: row["cutoff_date"] for row in metadata["hotels"]}
+    if len(boundaries) != len(metadata["hotels"]) or set(boundaries) != hotels:
+        raise ValueError("TripAdvisor metadata has different hotel IDs")
+    dates = defaultdict(lambda: {"earlier": [], "later": []})
+    limit = manifest["settings"]["max_chars"]
+    truncated = 0
+    for row in provenance:
+        original = _tripadvisor_row(row["source_review"])
+        document = reviews[row["id"]]
+        if original is None or (original["id"], original["hotel_id"]) != (
+                row["id"], row["hotel_id"]):
+            raise ValueError("TripAdvisor IDs differ from their source identities")
+        body = original["body"]
+        expected = body if limit is None else body[:limit]
+        if (document["hotel_id"] != row["hotel_id"] or document["body"] != expected
+                or row["original_chars"] != len(body)
+                or row["original_body_hash"] != _full_hash(body)
+                or row["post_date"] != original["post_date"]):
+            raise ValueError("TripAdvisor document or date differs from its source")
+        cohort = "earlier" if row["id"] in earlier else "later"
+        if row["cohort"] != cohort:
+            raise ValueError("TripAdvisor provenance has an incorrect cohort")
+        cutoff = boundaries[row["hotel_id"]]
+        if _tripadvisor_date(cutoff) != cutoff or (
+                (cohort == "earlier") != (row["post_date"] <= cutoff)):
+            raise ValueError("TripAdvisor cohort crosses its date boundary")
+        dates[row["hotel_id"]][cohort].append(row["post_date"])
+        truncated += int(len(expected) < len(body))
+    settings = manifest["settings"]
+    early_count = settings["reviews_per_hotel"] // 2
+    late_count = settings["reviews_per_hotel"] - early_count
+    for hotel, values in dates.items():
+        if (len(values["earlier"]) != early_count
+                or len(values["later"]) != late_count
+                or max(values["earlier"]) >= min(values["later"])):
+            raise ValueError(f"TripAdvisor hotel {hotel} has invalid dated cohorts")
+    counts = manifest["counts"]
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0
+           for value in counts.values()):
+        raise ValueError("TripAdvisor preparation counts must be nonnegative integers")
+    actual = {"hotels": len(hotels), "reviews": len(reviews),
+              "earlier": len(earlier), "later": len(later),
+              "same_hotel_pairs": len(hotels) * early_count * late_count,
+              "truncated_reviews": truncated}
+    if settings.get("pair_mode") == "all_unique_pairs":
+        actual["earlier_later_pairs"] = actual["same_hotel_pairs"]
+        per_hotel = settings["reviews_per_hotel"]
+        actual["same_hotel_pairs"] = len(hotels) * per_hotel * (per_hotel - 1) // 2
+    if any(counts.get(key) != value for key, value in actual.items()):
+        raise ValueError("TripAdvisor preparation counts do not match the corpus")
+    if (len(hotels) != settings["hotel_limit"]
+            or counts["eligible_hotels"] < len(hotels)
+            or counts["source_reviews"] - counts["excluded_text_or_date"]
+            < len(reviews)):
+        raise ValueError("TripAdvisor selection counts violate preparation settings")
