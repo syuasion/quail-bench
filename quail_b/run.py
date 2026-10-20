@@ -12,10 +12,13 @@ import pyarrow.parquet as pq
 
 from quail_b._files import download_cache
 from quail_b.benchmark import load_benchmark
+from quail_b.data import read_tripadvisor_manifest
 from quail_b.minimum import token_metrics
+from quail_b.relational import apply_tail
 from quail_b.rendering import PROMPT_FORMAT
 from quail_b.scoring import (
     RunOutput,
+    _apply_conditions,
     answer_labels,
     corpus_ids,
     encode_ids,
@@ -389,6 +392,16 @@ def _validate_output(spec, output, tables):
             raise ValueError("a returned row is not implied by the answers")
         validate_answers(sample)
         rows_follow_extracts(sample)
+    if output.rows is not None:
+        for join in spec.info.joins:
+            if not join.on or not set(join.relations).issubset(
+                    output.rows.column_names):
+                continue
+            for batch in output.rows.select(join.relations).to_batches(
+                    max_chunksize=ROW_SAMPLE):
+                rows = pa.Table.from_batches([batch])
+                if _apply_conditions(rows, join, spec, tables).num_rows != len(rows):
+                    raise ValueError("returned rows violate join equality conditions")
     filters = {
         filter_spec.id: filter_spec for filter_spec in spec.info.filters
     }
@@ -432,12 +445,29 @@ def _validate_output(spec, output, tables):
         validate_ids(table, [extracts[operator_id].relation])
         if not pa.types.is_string(table["answer"].type):
             raise ValueError("extracted answers must be strings or null")
+    info = spec.info
+    if (output.rows is not None and len(info.relations) == 1
+            and not info.filters and not info.joins and not info.in_lists
+            and not info.column_tests and info.aggregate is None
+            and info.having is None):
+        # Unary classification and scoring preserve input rows. This count
+        # is knowable even when an adapter omits its answer traces.
+        expected = len(tables[info.relations[0].table])
+        if info.fetch is not None:
+            expected = min(max(expected - info.fetch.offset, 0), info.fetch.count)
+        if output.rows.num_rows != expected:
+            raise ValueError(
+                f"the engine returned {output.rows.num_rows:,} rows but the "
+                f"query requires {expected:,}")
 
 
 def _score(spec, output, suite, gpu_count, gpu_hourly_rate_usd, tokens=None):
     """Score one query; `tokens` keeps document tokens across a run's queries."""
     _validate_output(spec, output, suite.tables)
-    accuracy = evaluate(spec, output, suite.ground_truth, suite.tables)
+    if suite.ground_truth is None:
+        _validate_unlabelled_scores(spec, output, suite.tables)
+    accuracy = (evaluate(spec, output, suite.ground_truth, suite.tables)
+                if suite.ground_truth is not None else None)
     seconds = output.runtime_s
     inputs = {
         relation.alias: len(suite.tables[relation.table])
@@ -449,6 +479,8 @@ def _score(spec, output, suite, gpu_count, gpu_hourly_rate_usd, tokens=None):
         **token_metrics(spec, output, suite.tables, tokens),
         "evaluated_document_pairs": None,
     }
+    if accuracy is None:
+        metrics["returned_rows"] = output.rows.num_rows
     metrics["input_tokens_per_second"] = (
         metrics["input_tokens"] / seconds
         if metrics["input_tokens"] is not None and seconds else None)
@@ -479,9 +511,62 @@ def _score(spec, output, suite, gpu_count, gpu_hourly_rate_usd, tokens=None):
     return metrics
 
 
+def _validate_unlabelled_scores(spec, output, tables):
+    """Check score domains and observable ranking without reference answers."""
+    def validate(column):
+        if column.null_count or not pa.types.is_floating(column.type):
+            raise ValueError("scores must be non-null floats")
+        valid = pc.and_(pc.is_finite(column), pc.and_(
+            pc.greater_equal(column, 0), pc.less_equal(column, 1)))
+        if len(column) and not pc.all(valid).as_py():
+            raise ValueError("scores must be finite and between zero and one")
+
+    for operator in spec.info.scores:
+        if operator.output in output.rows.column_names:
+            validate(output.rows[operator.output])
+        answer = (output.score_answers or {}).get(operator.id)
+        if answer is not None:
+            validate(answer["score"])
+            alias = operator.relation
+            if {alias, operator.output}.issubset(output.rows.column_names):
+                positions = pc.index_in(output.rows[alias], value_set=answer[alias])
+                expected = pc.take(answer["score"], positions)
+                expected = expected.cast(output.rows[operator.output].type)
+                equal = pc.fill_null(pc.equal(
+                    expected, output.rows[operator.output]), False)
+                if len(equal) and not pc.all(equal).as_py():
+                    raise ValueError("returned scores do not match saved answers")
+    sort = spec.info.sort
+    if sort is not None:
+        keys = [(output_name(name), "descending" if descending else "ascending")
+                for name, descending in sort.keys]
+        if all(name in output.rows.column_names for name, _ in keys):
+            if not output.rows.equals(output.rows.sort_by(keys)):
+                raise ValueError("returned rows do not follow the query's sort order")
+    info = spec.info
+    if (len(info.scores) != 1 or info.filters or info.joins or info.classifies
+            or info.column_tests or info.aggregate is not None):
+        return
+    operator = info.scores[0]
+    answer = (output.score_answers or {}).get(operator.id)
+    input_count = len(tables[info.relation(operator.relation).table])
+    if answer is None or len(answer) != input_count:
+        return
+    fields = answer.select([operator.relation, "score"]).rename_columns(
+        [f"{operator.relation}.id", f"{operator.relation}.{operator.output}"])
+    expected = apply_tail(fields.to_pandas(), spec)[list(info.select)]
+    expected.columns = [output_name(name) for name in info.select]
+    expected_rows = pa.Table.from_pandas(expected, preserve_index=False)
+    returned_rows = output.rows.select(expected.columns)
+    expected_rows = expected_rows.cast(returned_rows.schema)
+    if not expected_rows.equals(returned_rows):
+        raise ValueError("returned rows do not match the score answers and query limit")
+
+
 def run(run_query, *, queries=None, scale_factor=0.1, output_dir,
         metadata=None, gpu_count=1, gpu_hourly_rate_usd=None,
-        collection_id=None, cache_dir=None, data_dir=None, root=None):
+        collection_id=None, cache_dir=None, data_dir=None, root=None,
+        accuracy=True, corpus_manifest=None):
     """Run selected queries, save their answers, and generate a report.
 
     Args:
@@ -496,6 +581,9 @@ def run(run_query, *, queries=None, scale_factor=0.1, output_dir,
         cache_dir: Download cache directory, or None for the default.
         data_dir: Optional directory of input Parquet files to validate.
         root: Optional published-data mirror for offline use.
+        accuracy: Whether to load labels and compute reference agreement.
+        corpus_manifest: Local TripAdvisor manifest. Its inputs are copied
+            into the run directory for portable report regeneration.
 
     Returns:
         The saved run record. Query failures raise after saving their status.
@@ -516,12 +604,15 @@ def run(run_query, *, queries=None, scale_factor=0.1, output_dir,
     with download_cache(cache_dir):
         suite = load_benchmark(
             queries, scale_factor=scale_factor, collection_id=collection_id,
-            data_dir=data_dir, root=root)
+            data_dir=data_dir, root=root, accuracy=accuracy,
+            corpus_manifest=corpus_manifest)
     truth = suite.ground_truth
     record = {
         "schema_version": RUN_SCHEMA_VERSION, "quail_b_version": __version__,
-        "scale_factor": scale_factor, "corpus_id": suite.corpus_id,
-        "collection_id": truth.collection_id, "reference_model": truth.reference_model,
+        "scale_factor": suite.scale_factor, "corpus_id": suite.corpus_id,
+        "accuracy_enabled": accuracy,
+        "collection_id": truth.collection_id if truth is not None else None,
+        "reference_model": truth.reference_model if truth is not None else None,
         "metadata": metadata or {}, "gpu_count": gpu_count,
         "gpu_hourly_rate_usd": gpu_hourly_rate_usd,
         "started_at": datetime.now(timezone.utc).isoformat(), "status": "running",
@@ -530,6 +621,9 @@ def run(run_query, *, queries=None, scale_factor=0.1, output_dir,
              "status": "pending"} for spec in suite.queries],
     }
     directory.mkdir(parents=True, exist_ok=False)
+    if corpus_manifest is not None:
+        _save_local_inputs(directory, corpus_manifest, suite.corpus_id)
+        record["corpus_manifest"] = "inputs/manifest.json"
     path = directory / "run.json"
     _write_json(path, record)
     tokens = {}
@@ -574,3 +668,20 @@ def run(run_query, *, queries=None, scale_factor=0.1, output_dir,
         _write_json(path, record)
         _write_report(directory, record)
     return record
+
+
+def _save_local_inputs(directory, manifest_path, corpus_id):
+    """Save a checked corpus snapshot without unrelated source-directory files."""
+    manifest, tables = read_tripadvisor_manifest(manifest_path)
+    if manifest["corpus_id"] != corpus_id:
+        raise ValueError("TripAdvisor corpus changed during run preparation")
+    inputs = directory / "inputs"
+    inputs.mkdir()
+    for name, table in tables.items():
+        pq.write_table(table, inputs / f"{name}.parquet", compression="zstd")
+    source_path = Path(manifest_path).resolve()
+    source = source_path if source_path.is_dir() else source_path.parent
+    metadata = json.loads((source / "metadata.json").read_text())
+    _write_json(inputs / "metadata.json", metadata)
+    _write_json(inputs / "manifest.json", manifest)
+    read_tripadvisor_manifest(inputs / "manifest.json")

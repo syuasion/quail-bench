@@ -386,9 +386,37 @@ SEC_PREDICATES = (
         descriptions=prompts.SEC_CEO_SUCCESSOR_DESCRIPTIONS),
 )
 
+# TripAdvisor definitions, defined before their labels are published.
+TRIPADVISOR_PREDICATES = (
+    PredicateSpec(
+        "quailb.tripadvisor.review.problem", "tripadvisor", "review_problem",
+        "filter", prompts.TA_1_1, "review", "tripadvisor_reviews", "body",
+        source_policy="unpublished"),
+    PredicateSpec(
+        "quailb.tripadvisor.review.unresolved_help", "tripadvisor",
+        "review_unresolved_help", "filter", prompts.TA_1_2,
+        "review", "tripadvisor_reviews", "body", source_policy="unpublished"),
+    PredicateSpec(
+        "quailb.tripadvisor.review.department", "tripadvisor",
+        "review_department", "classify", prompts.TA_2,
+        "review", "tripadvisor_reviews", "body", source_policy="unpublished",
+        labels=prompts.TA_2_LABELS,
+        descriptions=prompts.TA_2_DESCRIPTIONS),
+    PredicateSpec(
+        "quailb.tripadvisor.pair.same_problem", "tripadvisor",
+        "pair_same_problem", "join", prompts.TA_3,
+        "review_a", "tripadvisor_pair_left", "body",
+        "review_b", "tripadvisor_pair_right", "body", source_policy="unpublished"),
+    PredicateSpec(
+        "quailb.tripadvisor.review.forced_move", "tripadvisor",
+        "review_forced_move", "filter", prompts.REL_TA_1,
+        "review", "tripadvisor_reviews", "body", source_policy="unpublished"),
+)
+
 PREDICATE_BY_KEY = {p.key: p for p in (
     PREDICATES + CLASSIFY_PREDICATES + EXTRACT_PREDICATES
-    + IMDB_EXTRACT_PREDICATES + WRENCH_EXTRACT_PREDICATES + SEC_PREDICATES)}
+    + IMDB_EXTRACT_PREDICATES + WRENCH_EXTRACT_PREDICATES + SEC_PREDICATES
+    + TRIPADVISOR_PREDICATES)}
 
 WORKLOADS = tuple(dict.fromkeys(spec.workload for spec in PREDICATES))
 

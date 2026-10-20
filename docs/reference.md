@@ -18,6 +18,28 @@ running the benchmark, the queries, and the results.
 
 ## Adapter function
 
+### Runs without reference labels
+
+`quail_b.run(..., accuracy=False)` validates and saves engine outputs without
+loading reference labels. Its accuracy metrics, reference model, and collection
+ID are null. Available time, token, and cost metrics remain active. This mode
+does not relax result schemas, document IDs, label choices, or answer consistency.
+
+For this fork's pending TripAdvisor queries, pass `corpus_manifest` and select
+the query IDs explicitly. The loader validates all input tables and metadata
+against the local manifest before calling the engine. It records no published
+scale factor for this custom corpus. Reference-label attachment is not yet
+supported for TripAdvisor; `accuracy=True` fails explicitly.
+
+TripAdvisor runs copy their prepared inputs to `inputs/` in the output directory.
+`run.json` stores the relative manifest path and accuracy mode. Rescoring uses
+that snapshot and requires matching corpus and query identities. The optional
+`report(..., corpus_manifest=...)` override must identify the same corpus.
+
+Existing records without these optional fields keep their published-corpus
+behavior and enabled accuracy. Token minimums remain per-query; this extension
+does not introduce a session-wide cache metric.
+
 ```python
 def run_query(
     query: quail_b.QuerySpec,
@@ -602,6 +624,13 @@ exact match rate is 0.5.
 An extraction label set stores `left_id`, a null `right_id`, and an `answers`
 column. `answers` lists the text of each reference span. The list is empty
 where the document does not answer the question.
+
+### TripAdvisor drafts
+
+The four TripAdvisor queries are drafts: the catalog marks them `draft`, and
+they have no published labels yet. `quail_b.queries()` leaves them out;
+`queries(include_draft=True)` and `get_query` return them. Run them with a
+prepared local `corpus_manifest` and `accuracy=False`.
 
 ## Measurements
 

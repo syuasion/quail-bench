@@ -19,6 +19,258 @@ from quail_b.data import (
 from quail_b.run import _write_json
 
 
+def _tripadvisor_output(spec, tables):
+    """Fabricate consistent answers to exercise the harness, not a model."""
+    from quail_b.scoring import rows_from_answers
+
+    relations = {item.alias: tables[item.table] for item in spec.info.relations}
+    filters = {
+        item.id: pa.table({item.relation: relations[item.relation]["id"],
+                           "answer": [True] * len(relations[item.relation])})
+        for item in spec.info.filters
+    }
+    joins = {}
+    matched = []
+    for item in spec.info.joins:
+        left, right = item.relations
+        matched = [{left: first["id"], right: second["id"]}
+                   for first in relations[left].to_pylist()
+                   for second in relations[right].to_pylist()
+                   if all(first[lcol] == second[rcol] for lcol, rcol in item.on)]
+        joins[item.id] = pa.table({
+            left: [row[left] for row in matched],
+            right: [row[right] for row in matched],
+            "answer": [True] * len(matched),
+        })
+    classifications = {}
+    for item in spec.info.classifies:
+        documents = (matched if item.partner is not None else
+                     [{item.relation: value}
+                      for value in relations[item.relation]["id"].to_pylist()])
+        classifications[item.id] = pa.table({
+            **{alias: [row[alias] for row in documents] for alias in item.relations},
+            "label": [item.labels[0]] * len(documents),
+        })
+    scores = {}
+    if spec.info.scores:
+        item = spec.info.scores[0]
+        ids = sorted(relations[item.relation]["id"].to_pylist())
+        values = [1 - index / len(ids) for index in range(len(ids))]
+        scores[item.id] = pa.table({item.relation: ids, "score": values})
+        rows = pa.table({item.relation: ids[:spec.info.fetch.count],
+                         item.output: values[:spec.info.fetch.count]})
+    else:
+        rows = rows_from_answers(spec, filters, joins, corpus_rows=tables,
+                                 classify_answers=classifications)
+    return quail_b.RunOutput(
+        filters, joins, rows, runtime_s=1.0,
+        measurements={"fresh_tokens": 100, "input_tokens": 100},
+        classify_answers=classifications, score_answers=scores)
+
+
+@pytest.mark.parametrize("as_directory", [False, True])
+def test_tripadvisor_pending_run_and_portable_report(
+        tmp_path, tripadvisor_corpus, as_directory):
+    import shutil
+
+    destination = tmp_path / "pending-run"
+    ids = ("TA-1", "TA-2", "TA-3", "REL-TA-1")
+    assert len(ids) == 4
+    record = quail_b.run(
+        _tripadvisor_output, queries=ids,
+        corpus_manifest=(tripadvisor_corpus.parent if as_directory
+                         else tripadvisor_corpus),
+        accuracy=False, output_dir=destination, gpu_hourly_rate_usd=3.0,
+        metadata={"engine": "fabricated CPU fixture"})
+    assert record["status"] == "complete"
+    assert record["scale_factor"] is None
+    assert record["accuracy_enabled"] is False
+    assert record["collection_id"] is None
+    assert record["reference_model"] is None
+    for item in record["queries"]:
+        metrics = item["metrics"]
+        assert metrics["accuracy"] is None
+        assert metrics["fresh_tokens"] == 100
+        assert metrics["returned_rows"] == (12 if item["id"] == "TA-3" else 8)
+        assert metrics["cost_usd"] == pytest.approx(3 / 3600)
+        assert (destination / item["id"] / "plan.substrait").exists()
+    measurements = pq.read_table(destination / "measurements.parquet").to_pylist()
+    assert len(measurements) == 4
+    assert all(row["answers_correct"] is None and row["expected_rows"] is None
+               and row["predicted_rows"] == (12 if row["query"] == "TA-3" else 8)
+               for row in measurements)
+    assert "Accuracy: unavailable" in (destination / "report.md").read_text()
+    shutil.rmtree(tripadvisor_corpus.parent)
+    moved = tmp_path / "moved-run"
+    destination.rename(moved)
+    quail_b.report(moved)
+    regenerated = json.loads((moved / "run.json").read_text())
+    assert regenerated["queries"] == record["queries"]
+    manifest = moved / "inputs" / "manifest.json"
+    changed = json.loads(manifest.read_text())
+    changed["settings"]["seed"] = 999
+    manifest.write_text(json.dumps(changed))
+    with pytest.raises(ValueError):
+        quail_b.report(moved)
+
+
+def test_tripadvisor_unlabelled_run_still_validates_outputs(
+        tmp_path, tripadvisor_corpus):
+    def invalid(spec, tables):
+        output = _tripadvisor_output(spec, tables)
+        output.rows = pa.table({"r": ["unknown-review"]})
+        return output
+
+    destination = tmp_path / "invalid-run"
+    with pytest.raises(ValueError):
+        quail_b.run(invalid, queries=["TA-1"], accuracy=False,
+                    corpus_manifest=tripadvisor_corpus, output_dir=destination)
+    record = json.loads((destination / "run.json").read_text())
+    assert record["status"] == "failed"
+    assert record["queries"][0]["status"] == "scoring_failed"
+    assert (destination / "TA-1" / "rows.parquet").exists()
+
+
+def test_tripadvisor_rows_only_outputs_obey_matching_keys(
+        tmp_path, tripadvisor_corpus):
+    def mismatched(spec, tables):
+        left = tables["tripadvisor_pair_left"].to_pylist()[0]
+        right = next(row for row in tables["tripadvisor_pair_right"].to_pylist()
+                     if row["pair_id"] != left["pair_id"])
+        return quail_b.RunOutput(
+            None, None, pa.table({"a": [left["id"]], "b": [right["id"]]}),
+            runtime_s=1.0)
+
+    with pytest.raises(ValueError, match="join equality"):
+        quail_b.run(mismatched, queries=["TA-3"], accuracy=False,
+                    corpus_manifest=tripadvisor_corpus,
+                    output_dir=tmp_path / "mismatched-run")
+
+
+@pytest.mark.parametrize("complaints", [(1, 3, 4), (1,), ()])
+def test_tripadvisor_gates_limit_join_answers_to_surviving_endpoints(
+        tripadvisor_corpus, complaints):
+    from quail_b.data import read_tripadvisor_manifest
+    from quail_b.run import _validate_output
+    from quail_b.scoring import rows_from_answers
+
+    spec = quail_b.get_query("TA-3")
+    _, tables = read_tripadvisor_manifest(tripadvisor_corpus)
+    endpoints = {relation.alias: tables[relation.table].to_pylist()
+                 for relation in spec.info.relations}
+    kept = {
+        alias: {row["id"] for row in rows
+                if int(row["review_id"]) % 100 in complaints}
+        for alias, rows in endpoints.items()
+    }
+    filters = {
+        operator.id: pa.table({
+            operator.relation: [row["id"]
+                                for row in endpoints[operator.relation]],
+            "answer": [row["id"] in kept[operator.relation]
+                       for row in endpoints[operator.relation]],
+        }) for operator in spec.info.filters
+    }
+    eligible = [{"a": left["id"], "b": right["id"], "answer": True}
+                for left in endpoints["a"] for right in endpoints["b"]
+                if left["pair_id"] == right["pair_id"]
+                and left["id"] in kept["a"] and right["id"] in kept["b"]]
+    schema = pa.schema([("a", pa.string()), ("b", pa.string()),
+                        ("answer", pa.bool_())])
+    joins = {"join-1": pa.Table.from_pylist(eligible, schema=schema)}
+    rows = rows_from_answers(spec, filters, joins, corpus_rows=tables)
+    output = quail_b.RunOutput(filters, joins, rows, runtime_s=1.0)
+    _validate_output(spec, output, tables)
+    assert all(len(answers) == 12 for answers in filters.values())
+    assert len(eligible) == len(rows) == len(complaints) * (len(complaints) - 1)
+    if not eligible:
+        return
+    left, right = next((left, right) for left in endpoints["a"]
+                       for right in endpoints["b"]
+                       if left["pair_id"] == right["pair_id"]
+                       and (left["id"] not in kept["a"]
+                            or right["id"] not in kept["b"]))
+    wrong = pa.table({"a": [left["id"]], "b": [right["id"]]})
+    output.rows = pa.concat_tables([wrong, rows.slice(1)])
+    with pytest.raises(ValueError, match="not implied"):
+        _validate_output(spec, output, tables)
+
+
+@pytest.mark.parametrize("fault", ["nan", "outside", "string", "order", "missing"])
+def test_tripadvisor_score_outputs_require_valid_ranking(
+        tmp_path, tripadvisor_corpus, fault):
+    def invalid(spec, tables):
+        output = _tripadvisor_output(spec, tables)
+        if fault in ("nan", "outside", "string"):
+            values = {"nan": [float("nan")] * len(output.rows),
+                      "outside": [1.1] * len(output.rows),
+                      "string": ["high"] * len(output.rows)}[fault]
+            output.rows = output.rows.set_column(
+                1, "forced_move_score", pa.array(values))
+        elif fault == "order":
+            output.rows = output.rows.take(pa.array([2, 1, 0]))
+        else:
+            output.rows = output.rows.slice(0, 2)
+        return output
+
+    with pytest.raises(ValueError):
+        quail_b.run(invalid, queries=["REL-TA-1"], accuracy=False,
+                    corpus_manifest=tripadvisor_corpus,
+                    output_dir=tmp_path / f"bad-score-{fault}")
+
+
+def test_tripadvisor_accepts_float32_returned_scores(tmp_path, tripadvisor_corpus):
+    def execute(spec, tables):
+        output = _tripadvisor_output(spec, tables)
+        output.rows = output.rows.set_column(
+            1, "forced_move_score", output.rows["forced_move_score"].cast(pa.float32()))
+        return output
+
+    record = quail_b.run(
+        execute, queries=["REL-TA-1"], accuracy=False,
+        corpus_manifest=tripadvisor_corpus, output_dir=tmp_path / "float32-run")
+    assert record["status"] == "complete"
+    quail_b.report(tmp_path / "float32-run")
+
+
+@pytest.mark.parametrize("query", ["TA-2", "REL-TA-1"])
+@pytest.mark.parametrize("traces,count", [("absent", 0), ("absent", 3), ("partial", 3)])
+def test_tripadvisor_unary_outputs_require_all_selected_rows(
+        tmp_path, tripadvisor_corpus, query, traces, count):
+    def incomplete(spec, tables):
+        output = _tripadvisor_output(spec, tables)
+        output.rows = output.rows.slice(0, count)
+        name = "classify_answers" if spec.info.classifies else "score_answers"
+        answers = getattr(output, name)
+        alias = spec.info.relations[0].alias
+        retained = set(output.rows[alias].to_pylist())
+        setattr(output, name, None if traces == "absent" else {
+            key: table.filter(pa.array([value in retained
+                                       for value in table[alias].to_pylist()]))
+            for key, table in answers.items()})
+        return output
+
+    with pytest.raises(ValueError, match="query requires 8"):
+        quail_b.run(incomplete, queries=[query], accuracy=False,
+                    corpus_manifest=tripadvisor_corpus,
+                    output_dir=tmp_path / "incomplete-run")
+
+
+@pytest.mark.parametrize("query", ["TA-2", "REL-TA-1"])
+def test_tripadvisor_complete_rows_do_not_require_answer_traces(
+        tmp_path, tripadvisor_corpus, query):
+    def execute(spec, tables):
+        output = _tripadvisor_output(spec, tables)
+        output.classify_answers = output.score_answers = None
+        return output
+
+    record = quail_b.run(
+        execute, queries=[query], accuracy=False,
+        corpus_manifest=tripadvisor_corpus, output_dir=tmp_path / "rows-only-run")
+    assert record["status"] == "complete"
+    assert record["queries"][0]["metrics"]["returned_rows"] == 8
+
+
 def _inputs(root, sf):
     spec = quail_b.get_query("IMDB-4")
     tables = {
@@ -308,4 +560,3 @@ def test_score_answers_are_saved_read_back_and_checked(tmp_path):
         _validate_output(spec, quail_b.RunOutput(
             {}, {}, rows, runtime_s=1.0, score_answers={"score-1": pa.table(
                 {"t": ["tr0"], "score": [1]})}), tables)
-

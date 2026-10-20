@@ -1,0 +1,210 @@
+{
+  "extension_urns": [
+    {
+      "extension_urn_anchor": 1,
+      "urn": "extension:org.fsdatalab.quail_b:functions_ai"
+    }
+  ],
+  "extensions": [
+    {
+      "extension_function": {
+        "extension_urn_reference": 1,
+        "function_anchor": 5,
+        "name": "ai_classify:str_str_list_list"
+      }
+    }
+  ],
+  "relations": [
+    {
+      "root": {
+        "input": {
+          "project": {
+            "common": {
+              "emit": {
+                "output_mapping": [
+                  4,
+                  5
+                ]
+              }
+            },
+            "expressions": [
+              {
+                "selection": {
+                  "direct_reference": {
+                    "struct_field": {}
+                  },
+                  "root_reference": {}
+                }
+              },
+              {
+                "selection": {
+                  "direct_reference": {
+                    "struct_field": {
+                      "field": 3
+                    }
+                  },
+                  "root_reference": {}
+                }
+              }
+            ],
+            "input": {
+              "project": {
+                "common": {
+                  "direct": {},
+                  "hint": {
+                    "alias": "classify-1",
+                    "output_names": [
+                      "r.id",
+                      "r.body",
+                      "r.hotel_id",
+                      "r.department"
+                    ]
+                  }
+                },
+                "expressions": [
+                  {
+                    "scalar_function": {
+                      "arguments": [
+                        {
+                          "value": {
+                            "literal": {
+                              "string": "Judge strictly from the review above which department should handle its hotel complaint, using the category descriptions.\n\n{0}"
+                            }
+                          }
+                        },
+                        {
+                          "value": {
+                            "selection": {
+                              "direct_reference": {
+                                "struct_field": {
+                                  "field": 1
+                                }
+                              },
+                              "root_reference": {}
+                            }
+                          }
+                        },
+                        {
+                          "value": {
+                            "literal": {
+                              "list": {
+                                "values": [
+                                  {
+                                    "string": "housekeeping"
+                                  },
+                                  {
+                                    "string": "maintenance"
+                                  },
+                                  {
+                                    "string": "front_desk"
+                                  },
+                                  {
+                                    "string": "billing"
+                                  },
+                                  {
+                                    "string": "manual_review"
+                                  },
+                                  {
+                                    "string": "no_action"
+                                  }
+                                ]
+                              }
+                            }
+                          }
+                        },
+                        {
+                          "value": {
+                            "literal": {
+                              "list": {
+                                "values": [
+                                  {
+                                    "string": "cleaning or replenishing linens and room supplies"
+                                  },
+                                  {
+                                    "string": "repair of equipment, fixtures, or building facilities"
+                                  },
+                                  {
+                                    "string": "check-in, reservations, staff assistance, or room allocation"
+                                  },
+                                  {
+                                    "string": "charges, payments, or refunds"
+                                  },
+                                  {
+                                    "string": "multiple departments, unclear ownership, or another responsibility"
+                                  },
+                                  {
+                                    "string": "no actionable hotel complaint, praise, or external conditions only"
+                                  }
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      ],
+                      "function_reference": 5,
+                      "output_type": {
+                        "string": {
+                          "nullability": "NULLABILITY_REQUIRED"
+                        }
+                      }
+                    }
+                  }
+                ],
+                "input": {
+                  "read": {
+                    "base_schema": {
+                      "names": [
+                        "id",
+                        "body",
+                        "hotel_id"
+                      ],
+                      "struct": {
+                        "nullability": "NULLABILITY_REQUIRED",
+                        "types": [
+                          {
+                            "string": {
+                              "nullability": "NULLABILITY_REQUIRED"
+                            }
+                          },
+                          {
+                            "string": {
+                              "nullability": "NULLABILITY_REQUIRED"
+                            }
+                          },
+                          {
+                            "string": {
+                              "nullability": "NULLABILITY_REQUIRED"
+                            }
+                          }
+                        ]
+                      }
+                    },
+                    "common": {
+                      "direct": {},
+                      "hint": {
+                        "alias": "r"
+                      }
+                    },
+                    "named_table": {
+                      "names": [
+                        "tripadvisor_reviews"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "names": [
+          "r",
+          "department"
+        ]
+      }
+    }
+  ],
+  "version": {
+    "minor_number": 103,
+    "producer": "quail-b"
+  }
+}

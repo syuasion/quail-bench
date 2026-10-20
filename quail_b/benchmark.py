@@ -16,6 +16,7 @@ from quail_b.data import (
     SOURCE_REVISIONS,
     corpus_identity,
     load_table,
+    read_tripadvisor_manifest,
 )
 from quail_b.labels import GroundTruthCollection, _read_json, load_ground_truth
 from quail_b.predicates import PREDICATE_BY_KEY, predicate_payload
@@ -49,13 +50,14 @@ class Benchmark:
 
     queries: tuple[QuerySpec, ...]
     tables: dict[str, pa.Table]
-    scale_factor: float
+    scale_factor: float | None
     corpus_id: str
     ground_truth: GroundTruthCollection | None
 
 
 def load_benchmark(only=None, *, scale_factor=0.1, data_dir=None,
-                   collection_id=None, accuracy=True, root=None) -> Benchmark:
+                   collection_id=None, accuracy=True, root=None,
+                   corpus_manifest=None) -> Benchmark:
     """Load selected inputs and labels, downloading published inputs by default.
 
     Args:
@@ -65,7 +67,28 @@ def load_benchmark(only=None, *, scale_factor=0.1, data_dir=None,
         collection_id: Reference collection ID, or None for the active one.
         accuracy: Whether to load reference labels for scoring.
         root: Published data root, or None for the public S3 bucket.
+        corpus_manifest: Validated local TripAdvisor manifest. Its hotel
+            sampling settings replace the published scale factor.
     """
+    if not isinstance(accuracy, bool):
+        raise TypeError("accuracy must be a boolean")
+    if corpus_manifest is not None:
+        if data_dir is not None:
+            raise ValueError("use corpus_manifest without data_dir")
+        if accuracy:
+            raise ValueError("TripAdvisor reference labels are pending; "
+                             "set accuracy=False")
+        if collection_id is not None:
+            raise ValueError("TripAdvisor has no reference label collection yet")
+        if only is None:
+            raise ValueError("select TripAdvisor query IDs explicitly")
+        specs = select_queries(only)
+        manifest, tables = read_tripadvisor_manifest(corpus_manifest)
+        names = {relation.table for spec in specs for relation in spec.info.relations}
+        if not names.issubset(tables):
+            raise ValueError("selected queries do not match the TripAdvisor corpus")
+        return Benchmark(specs, {name: tables[name] for name in sorted(names)},
+                         None, manifest["corpus_id"], None)
     specs = select_queries(only, scale_factor=scale_factor)
     if specs[0].id.startswith("SEC-"):
         return _load_sec_benchmark(specs, data_dir, collection_id, accuracy, root)

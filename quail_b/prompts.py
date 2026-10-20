@@ -790,3 +790,55 @@ SEC_EVENT_SENTENCE = (
     "Copy the whole sentence that states the event this filing reports, from "
     "the body of its first Item."
 )
+
+# TripAdvisor questions analyze reported experiences, not verified defects.
+TA_1_1 = (
+    "Judge strictly from the review above whether it reports a specific "
+    "hotel service or facility problem that affected the stay.\n\n{0}\n\n"
+    "Instruction: answer TRUE if the review reports such a problem, "
+    "FALSE otherwise."
+)
+
+TA_1_2 = (
+    "Judge strictly from the review above whether the guest asked hotel "
+    "staff for help and says the problem remained unresolved.\n\n{0}\n\n"
+    "Instruction: answer TRUE only if both are stated, FALSE otherwise."
+)
+
+TA_2 = (
+    "Judge strictly from the review above which department should handle "
+    "its hotel complaint, using the category descriptions.\n\n{0}"
+)
+TA_2_LABELS = (
+    "housekeeping", "maintenance", "front_desk", "billing",
+    "manual_review", "no_action",
+)
+TA_2_DESCRIPTIONS = (
+    "cleaning or replenishing linens and room supplies",
+    "repair of equipment, fixtures, or building facilities",
+    "check-in, reservations, staff assistance, or room allocation",
+    "charges, payments, or refunds",
+    "multiple departments, unclear ownership, or another responsibility",
+    "no actionable hotel complaint, praise, or external conditions only",
+)
+
+TA_3_1 = (
+    "Does DOCUMENT {0} explicitly report a concrete hotel problem or complaint? "
+    "Answer TRUE if it does, otherwise FALSE."
+)
+
+TA_3 = (
+    "Do BOTH hotel reviews in DOCUMENT {0} and DOCUMENT {1} explicitly report "
+    "the SAME specific hotel problem? Answer TRUE only if each review describes "
+    "a concrete hotel failure or complaint and the problems match. Answer FALSE "
+    "if either review reports no problem, contains only praise, or describes a "
+    "different problem. Shared amenities, positive experiences, broad topics, "
+    "and general sentiment do not count as a match."
+)
+
+REL_TA_1 = (
+    "Judge strictly from the review above whether a hotel problem forced "
+    "the guest to change rooms, leave early, or move to another hotel. "
+    "\n\n{0}\n\nInstruction: answer TRUE only if the review reports "
+    "that this happened, FALSE otherwise."
+)

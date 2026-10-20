@@ -109,6 +109,117 @@ the precision and recall of its rows against the reference result.
 
 ## Running the benchmark
 
+### TripAdvisor extension
+
+This fork adds four optional TripAdvisor queries through the existing plan
+and adapter framework. Their reference labels are pending. The default
+50-query workload stays unchanged.
+
+Prepare five hotels with 20 reviews each from the local original archive:
+
+```sh
+uv run --frozen quail-b prepare-tripadvisor ../tripadvisor/inputs-allpairs-20/5/corpus \
+  --archive-path ../tripadvisor/source/review.txt.zip \
+  --hotel-limit 5 --reviews-per-hotel 20 --seed 0 --pair-mode all_unique_pairs
+```
+
+The archive comes from the [original hotel-review corpus](
+https://www.cs.cmu.edu/~jiweil/html/hotel-review.html). Its pinned SHA256 is
+`a43302098170a6c0c086970077dc8a2fce466d431b3c9d9d80ef9565bb057d8d`.
+Preparation reads the ZIP locally. It does not download data or run a model.
+Use `--max-chars` to truncate text explicitly. Full text is retained by default.
+
+The output has three base Parquet tables, `manifest.json`, and `metadata.json`.
+Base tables have string columns `id`, `hotel_id`, and `body`. The builder maps
+raw review `id` to `id` and raw `offering_id` to `hotel_id`. Each body contains
+only the review title and text. Ratings, authors, and dates stay in metadata.
+The original source contains multiple languages; preparation does not filter
+for English.
+
+Hotels follow a stable seeded order. Increasing `--hotel-limit` keeps the
+smaller sample as a subset. Each selected hotel has a strict calendar-date
+boundary: ten sampled reviews precede ten sampled later reviews by default.
+The cohorts are disjoint, with no date shared across their boundary. This
+produces 100 reviews and 500 earlier/later candidate pairs in the historical
+mode. Current `TA-3` uses `--pair-mode all_unique_pairs`: five hotels with twenty
+reviews yield 950 unique unordered pairs. Two derived endpoint tables retain
+`review_id`, body, hotel, a unique execution `id`, and shared `pair_id`.
+Each endpoint first passes the same `TA_3_1` complaint filter. The AI join
+uses `pair_id` equality and the unchanged `TA_3` prompt. No self-pairs,
+reverse duplicates, or cross-hotel pairs are evaluated. Loading reconstructs
+and validates endpoints.
+
+The manifest records source hashes, settings, table hashes, provenance,
+excluded records, and truncation counts. Loading checks IDs, source text,
+cohort membership, dates, and content hashes. A supplied local archive can use
+an explicit `--source-sha256` pin. The default five-hotel sample is a setup
+check, not a representative estimate of hotel performance.
+
+| Query | Task | Existing plan pattern |
+| --- | --- | --- |
+| `TA-1` | Concrete hotel problem, then unsuccessful staff help | `IMDB-6`: two filters |
+| `TA-2` | Route each review to one of six handling categories | `IMDB-11`: unary classification |
+| `TA-3` | Filter complaints on both sides, then match the same concrete problem | `IMDB-2`: AI join; `FEV-10`: equality restriction |
+| `REL-TA-1` | Rank explicit forced moves; stable top 10 | `REL-AGENT-4`: score, sort, fetch |
+
+The source builder lives alongside the other builders in `quail_b/data.py`.
+The existing `tools/make_substrait_plans.py` generates these plans with the
+same operator classes and IDs. Loading returns the existing `Benchmark`;
+execution, output validation, and reports use `quail_b.run` and `quail_b.report`.
+Local manifest support supplies unpublished inputs and preserves their
+identity. There is no separate TripAdvisor parser, execution engine, or scorer.
+
+`TA-2` uses a fixed policy: `housekeeping`, `maintenance`, `front_desk`,
+`billing`, `manual_review`, and `no_action`. Multiple departments or unclear
+responsibility go to `manual_review`. `REL-TA-1` asks whether a hotel problem
+actually forced a room change, early departure, or relocation. Its score is
+the model's Boolean answer probability, not calibrated severity or risk.
+All judgments use reported review text; they do not verify events or show
+whether hotel management later fixed a recurring problem.
+
+`TA-3` requires a concrete hotel failure or complaint in both reviews. Reviews
+with no problem, only praise, or different problems must return FALSE. Shared
+amenities, positive experiences, broad topics, and general sentiment do not
+establish a match. This prompt was tightened on 2026-10-06. Runs with the earlier
+prompt retain a different query definition and definition hash. Keep their
+original plans and outputs; do not compare them as runs of the revised prompt.
+The unique-pair revision also changes the plan and corpus identity. Preserve
+historical earlier/later results. Native token minimum and regret describe
+execution-ID grouping in the prepared endpoint encoding. Original-review KV
+analysis must collapse copies by `review_id` and remain a separate report.
+The filtered revision adds `filter-1` on `a` and `filter-2` on `b` before
+`join-1`. For one hotel with 100 reviews, the 4,950 endpoint rows on each
+side require 9,900 unary answers. This plan does not filter each original
+review only once. The added gates change the query definition hash; preserve
+the prior unfiltered plans and outputs as a separate workload.
+
+Supply an engine through the existing callback contract:
+
+```python
+quail_b.run(
+    run_query,
+    queries=["TA-1", "TA-2", "TA-3", "REL-TA-1"],
+    corpus_manifest="../tripadvisor/inputs-allpairs-20/5/corpus/manifest.json",
+    accuracy=False,
+    output_dir="../tripadvisor/outputs/example",
+)
+```
+
+The local manifest replaces published scale-factor selection. Output
+validation and available token accounting remain active. Reference agreement
+is unavailable until independent labels exist. The run saves a validated
+input snapshot under `inputs/`, so reports can be regenerated after moving
+the run directory or removing the original prepared inputs:
+
+```sh
+uv run --frozen quail-b report ../tripadvisor/outputs/example
+```
+
+CPU tests use small source fixtures and fabricated adapter outputs. They
+check preparation, plans, validation, and reports. They do not measure model
+accuracy or GPU performance. Engine-specific experiment drivers stay in the
+adjacent `tripadvisor/` directory.
+
 A full call to `quail_b.run` looks like:
 
 ```python

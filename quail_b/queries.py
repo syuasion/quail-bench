@@ -236,6 +236,7 @@ QUERY_FAMILY_WORKLOADS = {
     "SALES": "sales",
     "CUAD": "cuad",
     "SEC": "sec",
+    "TA": "tripadvisor",
 }
 
 

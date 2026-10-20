@@ -6,6 +6,7 @@ from importlib.resources import files
 import pytest
 from substrait import plan_pb2
 
+from quail_b import prompts
 from quail_b.prompts import (
     CARDIOVASCULAR_REACTION,
     NEUROLOGICAL_REACTION,
@@ -35,6 +36,9 @@ from quail_b.substrait import (
     inspect_plan,
 )
 from tools.make_substrait_plans import write_plans
+
+
+TRIPADVISOR_QUERIES = ("TA-1", "TA-2", "TA-3", "REL-TA-1")
 
 
 def test_catalog_has_the_85_default_queries_and_two_privacy_queries():
@@ -253,7 +257,9 @@ def test_substrait_plans_are_packaged():
     catalog = package.joinpath("plans", "catalog.json")
     entries = json.loads(catalog.read_text())
 
-    assert len(entries) == 100
+    assert len(entries) == 104
+    assert tuple(entry["id"] for entry in entries
+                 if entry.get("draft"))[-4:] == TRIPADVISOR_QUERIES
     assert all(
         package.joinpath("plans", f"{entry['id']}.json").is_file()
         for entry in entries
@@ -295,6 +301,7 @@ def test_query_family_split_matches_benchmark_catalog():
         "SALES": "sales",
         "CUAD": "cuad",
         "SEC": "sec",
+        "TA": "tripadvisor",
     }
     assert split_query_families(QUERY_ORDER) == (
         QUERY_ORDER[0:15],
@@ -311,6 +318,98 @@ def test_query_family_split_matches_benchmark_catalog():
     )
     assert query_family_name(QUERY_ORDER[0:15]) == "imdb"
     assert query_family_name(QUERY_ORDER[43:50]) == "relational"
+
+
+def test_tripadvisor_plans_are_pending_and_reuse_existing_operators():
+    expected = TRIPADVISOR_QUERIES
+    assert all(query_id not in queries() for query_id in expected)
+    assert tuple(queries(include_draft=True))[-4:] == expected
+    assert split_query_families(expected) == (("REL-TA-1",), expected[:-1])
+    assert query_family_name(expected[:-1]) == "tripadvisor"
+    assert query_family_name(expected[-1:]) == "relational"
+    assert [item.prompt for item in get_query("TA-1").info.filters] == [
+        prompts.TA_1_1, prompts.TA_1_2]
+    assert get_query("TA-2").info.select == ("r.id", "r.department")
+
+
+def test_tripadvisor_join_is_blocked_by_source_hotel():
+    info = get_query("TA-3").info
+    assert [(item.alias, item.table, item.text_column) for item in info.relations] == [
+        ("a", "tripadvisor_pair_left", "body"),
+        ("b", "tripadvisor_pair_right", "body"),
+    ]
+    (join,) = info.joins
+    assert join.relations == ("a", "b")
+    assert join.on == (("pair_id", "pair_id"),)
+    assert join.prompt == prompts.TA_3
+
+
+def test_tripadvisor_join_filters_each_endpoint_for_an_explicit_complaint():
+    spec = get_query("TA-3")
+    expected_prompt = (
+        "Does DOCUMENT {0} explicitly report a concrete hotel problem or complaint? "
+        "Answer TRUE if it does, otherwise FALSE."
+    )
+    assert prompts.TA_3_1 == expected_prompt
+    assert [(item.id, item.relation, item.prompt) for item in spec.info.filters] == [
+        ("filter-1", "a", expected_prompt),
+        ("filter-2", "b", expected_prompt),
+    ]
+    original_plan = spec.plan
+    join = original_plan.relations[0].root.input.project.input.join
+    join.left.CopyFrom(join.left.filter.input)
+    join.right.CopyFrom(join.right.filter.input)
+    original = QuerySpec.from_plan(spec.id, spec.description, original_plan)
+    assert not original.info.filters
+    assert original.info.joins == spec.info.joins
+    assert _query_hash(original) != _query_hash(spec)
+
+
+def test_tripadvisor_join_requires_a_matching_concrete_problem_in_both_reviews():
+    spec = get_query("TA-3")
+    (join,) = spec.info.joins
+    assert (spec.id, join.id, spec.info.select) == (
+        "TA-3", "join-1", ("a.id", "b.id"))
+    expected_prompt = (
+        "Do BOTH hotel reviews in DOCUMENT {0} and DOCUMENT {1} explicitly report "
+        "the SAME specific hotel problem? Answer TRUE only if each review describes "
+        "a concrete hotel failure or complaint and the problems match. Answer FALSE "
+        "if either review reports no problem, contains only praise, or describes a "
+        "different problem. Shared amenities, positive experiences, broad topics, "
+        "and general sentiment do not count as a match."
+    )
+    assert join.prompt == expected_prompt
+
+
+def test_tripadvisor_join_revision_does_not_reuse_the_old_definition_hash():
+    revised = get_query("TA-3")
+    old_plan = revised.plan
+    old_prompt = (
+        old_plan.relations[0].root.input.project.input.join.expression
+        .scalar_function.arguments[0].value.scalar_function.arguments[0]
+        .value.literal
+    )
+    old_prompt.string = (
+        "Do the hotel reviews in DOCUMENT {0} and DOCUMENT {1} report the "
+        "same specific hotel problem, rather than just the same broad topic?"
+    )
+    original = QuerySpec.from_plan(revised.id, revised.description, old_plan)
+    assert original.info.joins[0].id == revised.info.joins[0].id
+    assert original.info.relations == revised.info.relations
+    assert original.info.joins[0].on == revised.info.joins[0].on
+    assert _query_hash(original) != _query_hash(revised)
+
+
+def test_tripadvisor_score_is_unary_boolean_with_stable_top_ten():
+    info = get_query("REL-TA-1").info
+    assert [(item.alias, item.table) for item in info.relations] == [
+        ("r", "tripadvisor_reviews")]
+    (score,) = info.scores
+    assert (score.relation, score.prompt, score.output) == (
+        "r", prompts.REL_TA_1, "forced_move_score")
+    assert info.select == ("r.id", "r.forced_move_score")
+    assert info.sort.keys == (("r.forced_move_score", True), ("r.id", False))
+    assert (info.fetch.count, info.fetch.offset) == (10, 0)
 
 
 def test_query_family_rejects_mixed_or_unknown_queries():
