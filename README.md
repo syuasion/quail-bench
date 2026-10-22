@@ -762,6 +762,7 @@ reports it as zero.
 | Fresh tokens | Positions processed by model forward passes |
 | Minimum tokens | Positions needed with an unlimited prefix KV cache |
 | KV regret | Fresh tokens above the minimum, as a percentage of fresh tokens |
+| Minimum tokens and KV regret by text | The same, counting rows with the same text once |
 | Input token throughput | Input tokens per second |
 | Cost per million input tokens | GPU cost divided by input tokens, times one million |
 

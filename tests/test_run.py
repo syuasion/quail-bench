@@ -421,6 +421,9 @@ def test_prompt_pieces_give_the_minimum_and_the_regret(
     assert metrics["input_tokens"] == 65
     assert metrics["input_tokens_per_second"] == 32.5
     assert metrics["regret_tokens"] == 1000 - minimum
+    # no two reviews share a text, so the minimum by text is the minimum
+    assert metrics["minimum_tokens_by_text"] == minimum
+    assert metrics["regret_tokens_by_text"] == 1000 - minimum
     cost = None if hourly_rate is None else 2 / 3600 * 2 * hourly_rate
     cost_per_million = None if cost is None else cost / 65 * 1e6
     regret_percent = 100 * (1000 - minimum) / 1000
@@ -438,6 +441,8 @@ def test_prompt_pieces_give_the_minimum_and_the_regret(
         "query": "IMDB-4", "runtime_s": 2.0, "fresh_tokens": 1000,
         "input_tokens": 65, "input_tokens_per_second": 32.5,
         "minimum_tokens": minimum, "regret_tokens": 1000 - minimum,
+        "minimum_tokens_by_text": minimum,
+        "regret_tokens_by_text": 1000 - minimum,
         "regret_approximate": False,
         "evaluated_document_pairs": 2, "input_rows": 3,
         "answers_evaluated": 2 * stages + 2, "answers_correct": 2 * stages + 2,
@@ -448,6 +453,7 @@ def test_prompt_pieces_give_the_minimum_and_the_regret(
         "cost_usd": cost,
         "cost_usd_per_million_input_tokens": cost_per_million,
         "kv_regret_percent": regret_percent,
+        "kv_regret_percent_by_text": regret_percent,
     }
     assert "| IMDB-4 | r: 2, a: 1 | 65 | 1000 |" in (
         destination / "report.md").read_text()

@@ -490,9 +490,11 @@ def _score(spec, output, suite, gpu_count, gpu_hourly_rate_usd, tokens=None):
     metrics["cost_usd_per_million_input_tokens"] = (
         metrics["cost_usd"] / metrics["input_tokens"] * 1e6
         if metrics["cost_usd"] is not None and metrics["input_tokens"] else None)
-    metrics["kv_regret_percent"] = (
-        100 * metrics["regret_tokens"] / metrics["fresh_tokens"]
-        if metrics["regret_tokens"] is not None and metrics["fresh_tokens"] else None)
+    for suffix in ("", "_by_text"):
+        regret = metrics[f"regret_tokens{suffix}"]
+        metrics[f"kv_regret_percent{suffix}"] = (
+            100 * regret / metrics["fresh_tokens"]
+            if regret is not None and metrics["fresh_tokens"] else None)
     if spec.info.joins:
         pairs = output.measurements.get("evaluated_document_pairs")
         if output.join_answers is not None:

@@ -342,6 +342,8 @@ def test_extraction_token_metrics_count_the_question_as_a_suffix(tmp_path):
     assert metrics["input_tokens"] == (
         3 * (1 + 2) + (5 + 4 + 3) + 2 * (1 + 3) + (5 + 3))
     assert metrics["regret_tokens"] == 40 - metrics["minimum_tokens"]
+    # no two contracts share a text, so the minimum by text is the minimum
+    assert metrics["minimum_tokens_by_text"] == metrics["minimum_tokens"]
     with pytest.raises(ValueError, match="missing extract operators"):
         minimum.validate_prompt_pieces(
             quail_b.get_query("CUAD-7"),
