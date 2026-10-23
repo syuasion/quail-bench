@@ -37,7 +37,6 @@ from quail_b.substrait import (
 )
 from tools.make_substrait_plans import write_plans
 
-
 TRIPADVISOR_QUERIES = ("TA-1", "TA-2", "TA-3", "REL-TA-1")
 
 

@@ -55,7 +55,7 @@ def test_every_classification_has_one_predicate():
         spec.template: spec for spec in specs}
     assert len(by_template) == len(specs)
     used = set()
-    for query_id in CLASSIFY_QUERIES:
+    for query_id in (*CLASSIFY_QUERIES, "TA-2"):
         for operator in quail_b.get_query(query_id).info.classifies:
             spec = by_template[operator.prompt]
             assert spec.labels == operator.labels

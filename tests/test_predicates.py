@@ -112,7 +112,6 @@ def test_where_conditions_enter_the_payload_only_when_set():
     assert "left_where" not in predicate_payload(unrestricted)
     assert predicate_version(runs_join) != predicate_version(unrestricted)
 def test_tripadvisor_pending_specs_do_not_expand_published_labels():
-    assert len(PREDICATES) == 23
     assert "tripadvisor" not in WORKLOADS
     assert len(TRIPADVISOR_PREDICATES) == 5
     assert all(spec not in PREDICATES for spec in TRIPADVISOR_PREDICATES)

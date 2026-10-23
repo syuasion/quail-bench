@@ -1476,12 +1476,12 @@ QUERIES = (
     # TripAdvisor starts without reference labels and stays opt-in.
     Query("TA-1", "TA_1_1 -> TA_1_2, 2 filters",
           _filters(_tripadvisor_reviews(), prompts.TA_1_1,
-                   prompts.TA_1_2), labels_pending=True),
+                   prompts.TA_1_2), draft=True),
     Query("TA-2", "classify: the department responsible for each complaint",
           Classify(_tripadvisor_reviews(), prompts.TA_2,
                    prompts.TA_2_LABELS, "department",
                    prompts.TA_2_DESCRIPTIONS),
-          select=("r", "r.department"), labels_pending=True),
+          select=("r", "r.department"), draft=True),
     Query("TA-3", "two TA_3_1 complaint filters -> TA_3 join: unique "
           "same-hotel pairs report the same problem",
           Join(_filters(Scan("tripadvisor_pair_left", "a", "body", ("pair_id",)),
@@ -1489,12 +1489,12 @@ QUERIES = (
                _filters(Scan("tripadvisor_pair_right", "b", "body", ("pair_id",)),
                         prompts.TA_3_1),
                ("a", "b"), prompts.TA_3,
-               on=(("pair_id", "pair_id"),)), labels_pending=True),
+               on=(("pair_id", "pair_id"),)), draft=True),
     Query("REL-TA-1", "REL_TA_1 score: top 10 reviews",
           Fetch(Sort(Score(_tripadvisor_reviews(), prompts.REL_TA_1,
                            "forced_move_score"),
                      (("r.forced_move_score", True), ("r.id", False))), 10),
-          select=("r", "r.forced_move_score"), labels_pending=True),
+          select=("r", "r.forced_move_score"), draft=True),
 )
 
 
