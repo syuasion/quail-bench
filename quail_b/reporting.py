@@ -309,8 +309,6 @@ def main():
         "prepare-tripadvisor", help="prepare hotel reviews from the original ZIP")
     prepare.add_argument("output_dir")
     prepare.add_argument("--archive-path", required=True, help="local review.txt.zip")
-    prepare.add_argument("--pair-mode", choices=("earlier_later", "all_unique_pairs"),
-                         default="earlier_later")
     prepare.add_argument("--source-sha256", help="expected archive SHA256")
     prepare.add_argument("--hotel-limit", type=int, default=5)
     prepare.add_argument("--reviews-per-hotel", type=int, default=20)
@@ -322,7 +320,7 @@ def main():
             args.output_dir, archive_path=args.archive_path,
             source_sha256=args.source_sha256, hotel_limit=args.hotel_limit,
             reviews_per_hotel=args.reviews_per_hotel, seed=args.seed,
-            max_chars=args.max_chars, pair_mode=args.pair_mode)
+            max_chars=args.max_chars)
         print(json.dumps(manifest, indent=2))
     else:
         print(report(args.run_dir, cache_dir=args.cache_dir, root=args.root,

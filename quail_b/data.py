@@ -15,7 +15,6 @@ import re
 from collections import Counter, defaultdict
 from datetime import datetime
 from functools import lru_cache
-from itertools import combinations
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -1829,10 +1828,6 @@ TRIPADVISOR_COLUMNS = {
     name: ("id", "hotel_id", "body") for name in (
         "tripadvisor_reviews", "tripadvisor_earlier", "tripadvisor_later")
 }
-TRIPADVISOR_PAIR_COLUMNS = {
-    f"tripadvisor_pair_{side}": ("id", "pair_id", "review_id", "hotel_id", "body")
-    for side in ("left", "right")
-}
 TRIPADVISOR_SOURCE_URL = "https://www.cs.cmu.edu/~jiweil/review.txt.zip"
 TRIPADVISOR_SOURCE_SHA256 = (
     "a43302098170a6c0c086970077dc8a2fce466d431b3c9d9d80ef9565bb057d8d"
@@ -1846,43 +1841,7 @@ TRIPADVISOR_MONTHS = {
 }
 
 
-def tripadvisor_pair_tables(reviews: pa.Table) -> dict[str, pa.Table]:
-    """Prepare each same-hotel unordered pair once, without changing reviews.
-
-    Both endpoint tables have one row per pair. Their shared ``pair_id``
-    supports an ordinary equality join before the AI predicate. Review IDs
-    and hotel IDs are sorted lexicographically, so source row order does not
-    affect endpoint IDs or Arrow output. Bodies remain the exact input text.
-    """
-    rows = reviews.select(["id", "hotel_id", "body"]).to_pylist()
-    by_hotel = {}
-    seen_ids = set()
-    for row in rows:
-        review_id = row["id"]
-        if review_id in seen_ids:
-            raise ValueError(f"duplicate TripAdvisor review ID: {review_id!r}")
-        seen_ids.add(review_id)
-        by_hotel.setdefault(row["hotel_id"], []).append(row)
-    endpoints = {"left": [], "right": []}
-    for hotel in sorted(by_hotel):
-        ordered = sorted(by_hotel[hotel], key=lambda row: row["id"])
-        for left, right in combinations(ordered, 2):
-            pair_id = json.dumps([left["id"], right["id"]],
-                                 separators=(",", ":"))
-            for side, review in (("left", left), ("right", right)):
-                endpoints[side].append({
-                    "id": f"{side}:{pair_id}", "pair_id": pair_id,
-                    "review_id": review["id"], "hotel_id": hotel,
-                    "body": review["body"],
-                })
-    schema = pa.schema([(name, pa.string()) for name in (
-        "id", "pair_id", "review_id", "hotel_id", "body")])
-    return {f"tripadvisor_pair_{side}": pa.Table.from_pylist(rows, schema=schema)
-            for side, rows in endpoints.items()}
-
-
-def _tripadvisor_settings(hotel_limit, reviews_per_hotel, seed, max_chars,
-                         pair_mode="earlier_later"):
+def _tripadvisor_settings(hotel_limit, reviews_per_hotel, seed, max_chars):
     for name, value, minimum in (("hotel_limit", hotel_limit, 1),
                                  ("reviews_per_hotel", reviews_per_hotel, 2)):
         if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
@@ -1893,17 +1852,18 @@ def _tripadvisor_settings(hotel_limit, reviews_per_hotel, seed, max_chars,
             isinstance(max_chars, bool) or not isinstance(max_chars, int)
             or max_chars < 1):
         raise ValueError("max_chars must be a positive integer or None")
-    if pair_mode not in ("earlier_later", "all_unique_pairs"):
-        raise ValueError("pair_mode must be earlier_later or all_unique_pairs")
     settings = {
         "hotel_limit": hotel_limit, "reviews_per_hotel": reviews_per_hotel,
         "seed": seed, "max_chars": max_chars,
         "sampling": "seeded-hotel-and-cohort-hash-v1",
         "partition": "strict-median-date-v1", "text_format": "title-text-v1",
     }
-    if pair_mode != "earlier_later":
-        settings["pair_mode"] = pair_mode
     return settings
+
+
+def _unique_pairs(count):
+    """Return the unordered pairs of distinct items among count items."""
+    return count * (count - 1) // 2
 
 
 def _tripadvisor_id(value):
@@ -1994,7 +1954,7 @@ def _tripadvisor_cutoff(dates, earlier_count, later_count):
 
 def build_tripadvisor(output_dir, *, archive_path=None, rows=None, hotel_limit=5,
                       reviews_per_hotel=20, seed=0, max_chars=None,
-                      source_sha256=None, pair_mode="earlier_later"):
+                      source_sha256=None):
     """Prepare a stable hotel sample and strictly dated review cohorts.
 
     Args:
@@ -2006,13 +1966,12 @@ def build_tripadvisor(output_dir, *, archive_path=None, rows=None, hotel_limit=5
         seed: Seed for stable hotel and within-cohort hash ordering.
         max_chars: Explicit body limit, or None to retain full text.
         source_sha256: Expected archive or canonical fixture SHA256, if given.
-        pair_mode: Earlier/later pairs, or prepared all_unique_pairs endpoints.
 
     Returns:
         The content-addressed preparation manifest.
     """
     settings = _tripadvisor_settings(
-        hotel_limit, reviews_per_hotel, seed, max_chars, pair_mode)
+        hotel_limit, reviews_per_hotel, seed, max_chars)
     if (archive_path is None) == (rows is None):
         raise ValueError("provide exactly one of archive_path or rows")
     directory = Path(output_dir)
@@ -2105,15 +2064,12 @@ def build_tripadvisor(output_dir, *, archive_path=None, rows=None, hotel_limit=5
         reviews=len(records["tripadvisor_reviews"]),
         earlier=len(records["tripadvisor_earlier"]),
         later=len(records["tripadvisor_later"]),
-        same_hotel_pairs=len(hotels) * earlier_count * later_count,
+        same_hotel_pairs=len(hotels) * _unique_pairs(reviews_per_hotel),
+        earlier_later_pairs=len(hotels) * earlier_count * later_count,
         truncated_reviews=truncated)
     tables = {name: pa.Table.from_pylist(records[name], schema=pa.schema(
         [(column, pa.string()) for column in columns]))
         for name, columns in TRIPADVISOR_COLUMNS.items()}
-    if pair_mode == "all_unique_pairs":
-        tables.update(tripadvisor_pair_tables(tables["tripadvisor_reviews"]))
-        counts["earlier_later_pairs"] = counts["same_hotel_pairs"]
-        counts["same_hotel_pairs"] = len(tables["tripadvisor_pair_left"])
     manifest = _tripadvisor_manifest_identity({
         "schema_version": TRIPADVISOR_SCHEMA_VERSION,
         "benchmark": "quailb-tripadvisor", "dataset": "tripadvisor",
@@ -2160,23 +2116,17 @@ def read_tripadvisor_manifest(path):
     source, settings = manifest["source"], manifest["settings"]
     expected = _tripadvisor_settings(
         settings["hotel_limit"], settings["reviews_per_hotel"],
-        settings["seed"], settings["max_chars"],
-        settings.get("pair_mode", "earlier_later"))
+        settings["seed"], settings["max_chars"])
     if (settings != expected or source.get("url") != TRIPADVISOR_SOURCE_URL
             or source.get("mode") not in ("local_zip", "provided_rows")
             or source.get("format") != "tripadvisor-jsonl-zip-v1"
             or not isinstance(source.get("sha256"), str)
             or re.fullmatch(r"[0-9a-f]{64}", source["sha256"]) is None):
         raise ValueError("unsupported TripAdvisor source or preparation settings")
-    all_pairs = settings.get("pair_mode") == "all_unique_pairs"
-    required_columns = {
-        **TRIPADVISOR_COLUMNS,
-        **(TRIPADVISOR_PAIR_COLUMNS if all_pairs else {}),
-    }
-    if set(manifest["tables"]) != set(required_columns):
-        raise ValueError("TripAdvisor input tables do not match its pair mode")
+    if set(manifest["tables"]) != set(TRIPADVISOR_COLUMNS):
+        raise ValueError("TripAdvisor manifest lists other input tables")
     tables, indexed = {}, {}
-    for name, columns in required_columns.items():
+    for name, columns in TRIPADVISOR_COLUMNS.items():
         table = pq.read_table(path.parent / f"{name}.parquet")
         schema = pa.schema([(column, pa.string()) for column in columns])
         if not table.schema.equals(schema, check_metadata=False):
@@ -2190,10 +2140,7 @@ def read_tripadvisor_manifest(path):
         if len(indexed[name]) != len(rows) or not rows:
             raise ValueError(f"{name} requires nonempty rows with unique IDs")
         for row in rows:
-            if name in TRIPADVISOR_COLUMNS:
-                _tripadvisor_id(row["id"])
-            else:
-                _tripadvisor_id(row["review_id"])
+            _tripadvisor_id(row["id"])
             _tripadvisor_id(row["hotel_id"])
             if not row["body"].strip():
                 raise ValueError(f"{name} contains an empty body")
@@ -2208,11 +2155,6 @@ def read_tripadvisor_manifest(path):
         _validate_tripadvisor_cohorts(indexed, metadata, manifest)
     except (KeyError, TypeError, AttributeError) as error:
         raise ValueError("malformed TripAdvisor provenance metadata") from error
-    if all_pairs:
-        derived = tripadvisor_pair_tables(tables["tripadvisor_reviews"])
-        for name, table in derived.items():
-            if not table.equals(tables[name], check_metadata=False):
-                raise ValueError(f"{name} differs from the unique source-review pairs")
     return manifest, tables
 
 
@@ -2271,12 +2213,10 @@ def _validate_tripadvisor_cohorts(indexed, metadata, manifest):
         raise ValueError("TripAdvisor preparation counts must be nonnegative integers")
     actual = {"hotels": len(hotels), "reviews": len(reviews),
               "earlier": len(earlier), "later": len(later),
-              "same_hotel_pairs": len(hotels) * early_count * late_count,
+              "same_hotel_pairs": len(hotels) * _unique_pairs(
+                  settings["reviews_per_hotel"]),
+              "earlier_later_pairs": len(hotels) * early_count * late_count,
               "truncated_reviews": truncated}
-    if settings.get("pair_mode") == "all_unique_pairs":
-        actual["earlier_later_pairs"] = actual["same_hotel_pairs"]
-        per_hotel = settings["reviews_per_hotel"]
-        actual["same_hotel_pairs"] = len(hotels) * per_hotel * (per_hotel - 1) // 2
     if any(counts.get(key) != value for key, value in actual.items()):
         raise ValueError("TripAdvisor preparation counts do not match the corpus")
     if (len(hotels) != settings["hotel_limit"]

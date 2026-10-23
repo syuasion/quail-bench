@@ -25,7 +25,7 @@ loading reference labels. Its accuracy metrics, reference model, and collection
 ID are null. Available time, token, and cost metrics remain active. This mode
 does not relax result schemas, document IDs, label choices, or answer consistency.
 
-For this fork's pending TripAdvisor queries, pass `corpus_manifest` and select
+For the draft TripAdvisor queries, pass `corpus_manifest` and select
 the query IDs explicitly. The loader validates all input tables and metadata
 against the local manifest before calling the engine. It records no published
 scale factor for this custom corpus. Reference-label attachment is not yet
@@ -72,7 +72,7 @@ quail_b.RunOutput(
 | `plan_bytes` | `bytes` | Serialized form of the same plan |
 
 The plan defines table scans, relation aliases, prompts, filters, joins,
-equality conditions, and the final projection. It uses the standard Substrait
+column conditions on joins, and the final projection. It uses the standard Substrait
 relational operators and these extension functions:
 
 ```text
@@ -118,6 +118,15 @@ labels the rows of the join below it instead of single documents;
 An IN-list filter keeps the documents whose label column holds one of the
 listed labels, as SQL's `r.sentiment IN ('negative', 'mixed')` does. It asks
 the model nothing.
+
+A `JoinRel` condition is the `ai_join` call, alone or in an `and` with column
+conditions. A column condition compares a column of the left relation with a
+column of the right one: `equal`, `not_equal`, `lt`, `lte`, `gt`, or `gte`.
+`Join.on` holds the equalities, and `Join.comparisons` holds the others, as
+(left column, comparison, right column). For example, TA-3 reads
+`tripadvisor_reviews` as `r1` and `r2` and keeps `r1.hotel_id = r2.hotel_id`
+and `r1.id < r2.id`, so each unordered pair of a hotel's reviews is asked
+once. String columns compare as strings.
 
 ## Input tables
 
@@ -233,8 +242,8 @@ stored column. E.g., SUPPORT-2 keeps only the customer messages with
 `u.role = 'user'`. The condition does not call the model. The engine applies it
 before the join, so the join asks fewer pairs. QUAIL-B scores this query per
 operator, like any other join query. Its reference rows are the pairs that pass
-the `WHERE` conditions and the equality conditions, and that the saved join
-labels answer TRUE.
+the `WHERE` conditions and the join's column conditions, and that the saved
+join labels answer TRUE.
 
 A join predicate can name `pair_columns`. Its labels then cover only the pairs
 whose two columns are equal. These pairs are the ones that the query's equality

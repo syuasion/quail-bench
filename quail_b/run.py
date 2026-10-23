@@ -394,14 +394,15 @@ def _validate_output(spec, output, tables):
         rows_follow_extracts(sample)
     if output.rows is not None:
         for join in spec.info.joins:
-            if not join.on or not set(join.relations).issubset(
+            if not (join.on or join.comparisons) or not set(
+                    join.relations).issubset(
                     output.rows.column_names):
                 continue
             for batch in output.rows.select(join.relations).to_batches(
                     max_chunksize=ROW_SAMPLE):
                 rows = pa.Table.from_batches([batch])
                 if _apply_conditions(rows, join, spec, tables).num_rows != len(rows):
-                    raise ValueError("returned rows violate join equality conditions")
+                    raise ValueError("returned rows violate the join conditions")
     filters = {
         filter_spec.id: filter_spec for filter_spec in spec.info.filters
     }

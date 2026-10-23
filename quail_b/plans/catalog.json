@@ -526,7 +526,7 @@
   },
   {
     "id": "TA-3",
-    "description": "two TA_3_1 complaint filters -> TA_3 join: unique same-hotel pairs report the same problem",
+    "description": "two TA_3_1 complaint filters -> TA_3 join: unique same-hotel review pairs report the same problem",
     "privacy": false,
     "draft": true
   },

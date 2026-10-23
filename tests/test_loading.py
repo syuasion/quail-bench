@@ -56,9 +56,9 @@ def test_tripadvisor_loader_uses_checked_local_inputs(
         ["TA-3"], corpus_manifest=tripadvisor_corpus, accuracy=False)
     assert suite.scale_factor is None
     assert suite.ground_truth is None
-    assert set(suite.tables) == {"tripadvisor_pair_left", "tripadvisor_pair_right"}
-    assert all(table.column_names == ["id", "pair_id", "review_id", "hotel_id", "body"]
-               for table in suite.tables.values())
+    assert set(suite.tables) == {"tripadvisor_reviews"}
+    assert suite.tables["tripadvisor_reviews"].column_names == [
+        "id", "hotel_id", "body"]
     for kwargs, message in [
         ({}, "reference labels are pending"),
         ({"accuracy": False, "data_dir": tripadvisor_corpus.parent},

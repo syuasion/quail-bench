@@ -22,12 +22,14 @@ AND_NAME = "and:bool"
 AGGREGATE_GENERIC_EXTENSION_URN = (
     "extension:io.substrait:functions_aggregate_generic")
 ARITHMETIC_EXTENSION_URN = "extension:io.substrait:functions_arithmetic"
-# WHERE conditions against a literal, by Substrait function name
+# comparisons in WHERE and join conditions, by Substrait function name
 COMPARISON_NAMES = {
     "equal:any_any": "=", "not_equal:any_any": "<>",
     "lt:any_any": "<", "lte:any_any": "<=",
     "gt:any_any": ">", "gte:any_any": ">=",
 }
+# the comparison with its two sides swapped
+_REVERSED = {"=": "=", "<>": "<>", "<": ">", "<=": ">=", ">": "<", ">=": "<="}
 # aggregate measures, by Substrait function name
 AGGREGATE_NAMES = {
     "count:any": "count", "sum:i32": "sum", "avg:i32": "avg",
@@ -66,10 +68,22 @@ class Filter:
 
 @dataclass(frozen=True)
 class Join:
+    """One ai_join call and the ordinary conditions beside it.
+
+    Attributes:
+        id: The operator ID.
+        relations: The aliases of `{0}` and `{1}`.
+        prompt: The prompt template.
+        on: Equal column pairs, left column first.
+        comparisons: Other column comparisons, as (left column,
+            comparison, right column); for example ("id", "<", "id").
+    """
+
     id: str
     relations: tuple[str, str]
     prompt: str
     on: tuple[tuple[str, str], ...] = ()
+    comparisons: tuple[tuple[str, str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -625,30 +639,36 @@ def _decode(
         for field in document_fields:
             text_columns = _with_text_column(text_columns, field)
         on = []
+        comparisons = []
         for condition in conditions:
             function = condition.scalar_function
             name = functions.get(function.function_reference)
             if name == AI_JOIN_NAME:
                 continue
-            if name != EQUAL_NAME:
+            if name not in COMPARISON_NAMES:
                 raise ValueError("unsupported QUAIL-B join condition")
-            equality = _arguments(condition)
-            if len(equality) != 2:
-                raise ValueError("equal needs two fields")
+            arguments = _arguments(condition)
+            if len(arguments) != 2:
+                raise ValueError("a join condition compares two fields")
             first, second = (
-                _selected(fields, expression) for expression in equality
+                _selected(fields, expression) for expression in arguments
             )
-            if (first[0], second[0]) == relation_aliases:
+            comparison = COMPARISON_NAMES[name]
+            if (second[0], first[0]) == relation_aliases:
+                first, second = second, first
+                comparison = _REVERSED[comparison]
+            elif (first[0], second[0]) != relation_aliases:
+                raise ValueError("join condition uses unrelated relations")
+            if comparison == "=":
                 on.append((first[1], second[1]))
-            elif (second[0], first[0]) == relation_aliases:
-                on.append((second[1], first[1]))
             else:
-                raise ValueError("join equality uses unrelated relations")
+                comparisons.append((first[1], comparison, second[1]))
         operator = Join(
             rel.join.common.hint.alias,
             relation_aliases,
             prompt,
             tuple(on),
+            tuple(comparisons),
         )
         return _Decoded(
             fields,

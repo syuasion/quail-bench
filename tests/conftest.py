@@ -21,6 +21,5 @@ def tripadvisor_corpus(tmp_path):
         "ratings": {"overall": 2},
     } for hotel in (10, 20) for day in range(1, 5)]
     directory = tmp_path / "tripadvisor-corpus"
-    build_tripadvisor(directory, rows=rows, hotel_limit=2, reviews_per_hotel=4,
-                      pair_mode="all_unique_pairs")
+    build_tripadvisor(directory, rows=rows, hotel_limit=2, reviews_per_hotel=4)
     return directory / "manifest.json"

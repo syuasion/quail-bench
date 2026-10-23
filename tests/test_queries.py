@@ -331,15 +331,16 @@ def test_tripadvisor_plans_are_pending_and_reuse_existing_operators():
     assert get_query("TA-2").info.select == ("r.id", "r.department")
 
 
-def test_tripadvisor_join_is_blocked_by_source_hotel():
+def test_tripadvisor_join_pairs_each_review_once_with_later_reviews_of_its_hotel():
     info = get_query("TA-3").info
     assert [(item.alias, item.table, item.text_column) for item in info.relations] == [
-        ("a", "tripadvisor_pair_left", "body"),
-        ("b", "tripadvisor_pair_right", "body"),
+        ("r1", "tripadvisor_reviews", "body"),
+        ("r2", "tripadvisor_reviews", "body"),
     ]
     (join,) = info.joins
-    assert join.relations == ("a", "b")
-    assert join.on == (("pair_id", "pair_id"),)
+    assert join.relations == ("r1", "r2")
+    assert join.on == (("hotel_id", "hotel_id"),)
+    assert join.comparisons == (("id", "<", "id"),)
     assert join.prompt == prompts.TA_3
 
 
@@ -351,8 +352,8 @@ def test_tripadvisor_join_filters_each_endpoint_for_an_explicit_complaint():
     )
     assert prompts.TA_3_1 == expected_prompt
     assert [(item.id, item.relation, item.prompt) for item in spec.info.filters] == [
-        ("filter-1", "a", expected_prompt),
-        ("filter-2", "b", expected_prompt),
+        ("filter-1", "r1", expected_prompt),
+        ("filter-2", "r2", expected_prompt),
     ]
     original_plan = spec.plan
     join = original_plan.relations[0].root.input.project.input.join
@@ -368,7 +369,7 @@ def test_tripadvisor_join_requires_a_matching_concrete_problem_in_both_reviews()
     spec = get_query("TA-3")
     (join,) = spec.info.joins
     assert (spec.id, join.id, spec.info.select) == (
-        "TA-3", "join-1", ("a.id", "b.id"))
+        "TA-3", "join-1", ("r1.id", "r2.id"))
     expected_prompt = (
         "Do BOTH hotel reviews in DOCUMENT {0} and DOCUMENT {1} explicitly report "
         "the SAME specific hotel problem? Answer TRUE only if each review describes "
@@ -432,3 +433,38 @@ def test_raw_query_hash_matches_before_chat(query_id, expected, monkeypatch):
     assert run_module._query_hash(spec) == expected
     monkeypatch.setattr(run_module, "PROMPT_FORMAT", "qwen3-chat-nonthinking-v1")
     assert run_module._query_hash(spec) != expected
+
+
+def test_a_join_comparison_written_right_side_first_is_read_left_side_first():
+    import pyarrow as pa
+
+    from quail_b.scoring import _apply_conditions
+
+    spec = get_query("TA-3")
+    plan = plan_pb2.Plan()
+    plan.CopyFrom(spec.plan)
+    names = {declaration.extension_function.function_anchor:
+             declaration.extension_function.name
+             for declaration in plan.extensions}
+    join = plan.relations[0].root.input.project.input.join
+    (less,) = [argument.value.scalar_function
+               for argument in join.expression.scalar_function.arguments
+               if names[argument.value.scalar_function.function_reference]
+               == "lt:any_any"]
+    first, second = (argument.value for argument in less.arguments)
+    swapped = (second.SerializeToString(), first.SerializeToString())
+    less.arguments[0].value.ParseFromString(swapped[0])
+    less.arguments[1].value.ParseFromString(swapped[1])
+    reversed_spec = QuerySpec.from_plan(spec.id, spec.description, plan)
+    (reversed_join,) = reversed_spec.info.joins
+    assert reversed_join.comparisons == (("id", ">", "id"),)
+
+    reviews = pa.table({"id": ["1", "2", "3"], "hotel_id": ["10", "10", "20"],
+                        "body": ["a", "b", "c"]})
+    pairs = pa.table({"r1": ["1", "2", "1", "1"], "r2": ["2", "1", "1", "3"]})
+    corpus = {"tripadvisor_reviews": reviews}
+    (join_spec,) = spec.info.joins
+    kept = _apply_conditions(pairs, join_spec, spec, corpus)
+    assert kept.to_pydict() == {"r1": ["1"], "r2": ["2"]}
+    kept = _apply_conditions(pairs, reversed_join, reversed_spec, corpus)
+    assert kept.to_pydict() == {"r1": ["2"], "r2": ["1"]}

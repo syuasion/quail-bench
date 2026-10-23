@@ -371,25 +371,26 @@ def _column_by_id(rows, column: str, ids) -> pa.Array:
 
 def _apply_conditions(table: pa.Table, join, spec: QuerySpec,
                       corpus_rows) -> pa.Table:
-    """Keep the pairs of string ids that satisfy the join's equalities.
+    """Keep the pairs of string ids that satisfy the join's column conditions.
 
-    corpus_rows is needed only when the join has equality conditions.
+    corpus_rows is needed only when the join has such conditions.
     """
-    if not join.on:
+    conditions = (*((left, "=", right) for left, right in join.on),
+                  *join.comparisons)
+    if not conditions:
         return table
     if corpus_rows is None:
         raise ValueError(
-            f"{spec.id}: the join on {join.on} needs the corpus rows to "
-            f"apply its equality conditions")
+            f"{spec.id}: the join on {conditions} needs the corpus rows")
     left, right = join.relations
     left_rows = corpus_rows[spec.info.relation(left).table]
     right_rows = corpus_rows[spec.info.relation(right).table]
     mask = pa.array([True] * table.num_rows, pa.bool_())
-    for left_column, right_column in join.on:
-        equal = pc.equal(
+    for left_column, comparison, right_column in conditions:
+        passed = _COMPARE[comparison](
             _column_by_id(left_rows, left_column, table.column(left)),
             _column_by_id(right_rows, right_column, table.column(right)))
-        mask = pc.and_(mask, pc.fill_null(equal, False))
+        mask = pc.and_(mask, pc.fill_null(passed, False))
     return table.filter(mask)
 
 

@@ -54,7 +54,6 @@ from quail_b.data import (
     _wrench_tasks,
     build_tripadvisor,
     read_tripadvisor_manifest,
-    tripadvisor_pair_tables,
 )
 
 
@@ -430,7 +429,8 @@ def test_tripadvisor_default_sampling_and_correct_hotel_id(tmp_path):
     manifest, tables = read_tripadvisor_manifest(tmp_path)
     assert built == manifest
     assert manifest["counts"]["reviews"] == 100
-    assert manifest["counts"]["same_hotel_pairs"] == 500
+    assert manifest["counts"]["same_hotel_pairs"] == 950
+    assert manifest["counts"]["earlier_later_pairs"] == 500
     assert len(tables["tripadvisor_earlier"]) == len(tables["tripadvisor_later"]) == 50
     for table in tables.values():
         assert table.column_names == ["id", "hotel_id", "body"]
@@ -448,83 +448,10 @@ def test_tripadvisor_default_sampling_and_correct_hotel_id(tmp_path):
             min(row["post_date"] for row in cohort if row["cohort"] == "later"))
 
 
-def test_tripadvisor_default_identity_is_unchanged(tmp_path):
+def test_tripadvisor_default_identity_is_stable(tmp_path):
     baseline = build_tripadvisor(tmp_path / "default", rows=_tripadvisor_rows())
-    explicit = build_tripadvisor(tmp_path / "explicit", rows=_tripadvisor_rows(),
-                                pair_mode="earlier_later")
-    assert baseline == explicit
-    assert "pair_mode" not in baseline["settings"]
     assert baseline["corpus_full_hash"] == (
-        "fecb65495f75091c11b78b1c15b36555abe7f38d1e06780dbf8cd70fee09fc37")
-
-
-def test_tripadvisor_all_unique_pairs_preserves_sample_and_full_bodies(tmp_path):
-    base = build_tripadvisor(tmp_path / "base", rows=_tripadvisor_rows())
-    manifest = build_tripadvisor(tmp_path / "pairs", rows=_tripadvisor_rows(),
-                                pair_mode="all_unique_pairs")
-    _, base_tables = read_tripadvisor_manifest(tmp_path / "base")
-    read, tables = read_tripadvisor_manifest(tmp_path / "pairs")
-    assert read == manifest
-    assert manifest["settings"]["pair_mode"] == "all_unique_pairs"
-    assert manifest["counts"]["same_hotel_pairs"] == 950
-    assert manifest["counts"]["earlier_later_pairs"] == 500
-    assert manifest["corpus_id"] != base["corpus_id"]
-    assert all(table.equals(tables[name]) for name, table in base_tables.items())
-    reviews = {row["id"]: row for row in tables["tripadvisor_reviews"].to_pylist()}
-    left = tables["tripadvisor_pair_left"].to_pylist()
-    right = tables["tripadvisor_pair_right"].to_pylist()
-    assert len(left) == len(right) == 950
-    pairs = set()
-    for first, second in zip(left, right, strict=True):
-        assert first["review_id"] < second["review_id"]
-        assert first["hotel_id"] == second["hotel_id"]
-        assert first["pair_id"] == second["pair_id"]
-        assert json.loads(first["pair_id"]) == [first["review_id"], second["review_id"]]
-        for endpoint in (first, second):
-            assert endpoint["body"] == reviews[endpoint["review_id"]]["body"]
-            assert endpoint["hotel_id"] == reviews[endpoint["review_id"]]["hotel_id"]
-        pairs.add((first["review_id"], second["review_id"]))
-    assert len(pairs) == 950
-    assert not pairs & {(second, first) for first, second in pairs}
-
-
-def test_tripadvisor_pair_tables_are_stable_and_reject_duplicate_ids():
-    reviews = pa.table({"id": ["3", "1", "2", "4"],
-                        "hotel_id": ["10", "10", "10", "20"],
-                        "body": ["C", "A", "B", "D"]})
-    expected = tripadvisor_pair_tables(reviews)
-    reordered = tripadvisor_pair_tables(reviews.take([3, 2, 1, 0]))
-    assert all(table.equals(reordered[name]) for name, table in expected.items())
-    assert len(expected["tripadvisor_pair_left"]) == 3
-    with pytest.raises(ValueError, match="duplicate TripAdvisor"):
-        tripadvisor_pair_tables(pa.concat_tables([reviews, reviews.slice(0, 1)]))
-
-
-@pytest.mark.parametrize("fault", ["body", "pair_id", "review_id", "order"])
-def test_tripadvisor_pair_reader_rejects_rehashed_endpoint_changes(tmp_path, fault):
-    manifest = build_tripadvisor(tmp_path, rows=_tripadvisor_rows(),
-                                pair_mode="all_unique_pairs")
-    name = "tripadvisor_pair_left"
-    path = tmp_path / f"{name}.parquet"
-    table = pq.read_table(path)
-    rows = table.to_pylist()
-    if fault == "body":
-        rows[0]["body"] += " changed"
-    elif fault == "pair_id":
-        rows[0]["pair_id"] = "[]"
-    elif fault == "review_id":
-        rows[0]["review_id"] = rows[-1]["review_id"]
-    else:
-        rows[0], rows[1] = rows[1], rows[0]
-    changed = pa.Table.from_pylist(rows, schema=table.schema)
-    pq.write_table(changed, path)
-    manifest["tables"][name] = _tripadvisor_table_identity(changed)
-    manifest = _tripadvisor_manifest_identity({
-        key: value for key, value in manifest.items()
-        if key not in ("corpus_id", "corpus_full_hash")})
-    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
-    with pytest.raises(ValueError, match="unique source-review pairs"):
-        read_tripadvisor_manifest(tmp_path)
+        "ad08f06501cfb24346092183666a7cc8caa2eea7ce586faec0db0fe1d31edece")
 
 
 def test_tripadvisor_nested_stable_sampling_and_explicit_truncation(tmp_path):

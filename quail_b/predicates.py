@@ -405,8 +405,9 @@ TRIPADVISOR_PREDICATES = (
     PredicateSpec(
         "quailb.tripadvisor.pair.same_problem", "tripadvisor",
         "pair_same_problem", "join", prompts.TA_3,
-        "review_a", "tripadvisor_pair_left", "body",
-        "review_b", "tripadvisor_pair_right", "body", source_policy="unpublished"),
+        "review", "tripadvisor_reviews", "body",
+        "other_review", "tripadvisor_reviews", "body",
+        source_policy="unpublished", pair_columns=("hotel_id", "hotel_id")),
     PredicateSpec(
         "quailb.tripadvisor.review.forced_move", "tripadvisor",
         "review_forced_move", "filter", prompts.REL_TA_1,

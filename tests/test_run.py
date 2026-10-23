@@ -18,6 +18,8 @@ from quail_b.data import (
 )
 from quail_b.run import _write_json
 
+_COMPARE = {"<": lambda a, b: a < b, ">": lambda a, b: a > b}
+
 
 def _tripadvisor_output(spec, tables):
     """Fabricate consistent answers to exercise the harness, not a model."""
@@ -36,7 +38,9 @@ def _tripadvisor_output(spec, tables):
         matched = [{left: first["id"], right: second["id"]}
                    for first in relations[left].to_pylist()
                    for second in relations[right].to_pylist()
-                   if all(first[lcol] == second[rcol] for lcol, rcol in item.on)]
+                   if all(first[lcol] == second[rcol] for lcol, rcol in item.on)
+                   and all(_COMPARE[op](first[lcol], second[rcol])
+                           for lcol, op, rcol in item.comparisons)]
         joins[item.id] = pa.table({
             left: [row[left] for row in matched],
             right: [row[right] for row in matched],
@@ -134,14 +138,16 @@ def test_tripadvisor_unlabelled_run_still_validates_outputs(
 def test_tripadvisor_rows_only_outputs_obey_matching_keys(
         tmp_path, tripadvisor_corpus):
     def mismatched(spec, tables):
-        left = tables["tripadvisor_pair_left"].to_pylist()[0]
-        right = next(row for row in tables["tripadvisor_pair_right"].to_pylist()
-                     if row["pair_id"] != left["pair_id"])
+        reviews = tables["tripadvisor_reviews"].to_pylist()
+        # the same hotel, but the later id first
+        left, right = sorted((row for row in reviews
+                              if row["hotel_id"] == reviews[0]["hotel_id"]),
+                             key=lambda row: row["id"], reverse=True)[:2]
         return quail_b.RunOutput(
-            None, None, pa.table({"a": [left["id"]], "b": [right["id"]]}),
+            None, None, pa.table({"r1": [left["id"]], "r2": [right["id"]]}),
             runtime_s=1.0)
 
-    with pytest.raises(ValueError, match="join equality"):
+    with pytest.raises(ValueError, match="join conditions"):
         quail_b.run(mismatched, queries=["TA-3"], accuracy=False,
                     corpus_manifest=tripadvisor_corpus,
                     output_dir=tmp_path / "mismatched-run")
@@ -156,41 +162,36 @@ def test_tripadvisor_gates_limit_join_answers_to_surviving_endpoints(
 
     spec = quail_b.get_query("TA-3")
     _, tables = read_tripadvisor_manifest(tripadvisor_corpus)
-    endpoints = {relation.alias: tables[relation.table].to_pylist()
-                 for relation in spec.info.relations}
-    kept = {
-        alias: {row["id"] for row in rows
-                if int(row["review_id"]) % 100 in complaints}
-        for alias, rows in endpoints.items()
-    }
+    reviews = tables["tripadvisor_reviews"].to_pylist()
+    kept = {row["id"] for row in reviews if int(row["id"]) % 100 in complaints}
     filters = {
         operator.id: pa.table({
-            operator.relation: [row["id"]
-                                for row in endpoints[operator.relation]],
-            "answer": [row["id"] in kept[operator.relation]
-                       for row in endpoints[operator.relation]],
+            operator.relation: [row["id"] for row in reviews],
+            "answer": [row["id"] in kept for row in reviews],
         }) for operator in spec.info.filters
     }
-    eligible = [{"a": left["id"], "b": right["id"], "answer": True}
-                for left in endpoints["a"] for right in endpoints["b"]
-                if left["pair_id"] == right["pair_id"]
-                and left["id"] in kept["a"] and right["id"] in kept["b"]]
-    schema = pa.schema([("a", pa.string()), ("b", pa.string()),
+
+    def same_hotel_pairs():
+        return [(left, right) for left in reviews for right in reviews
+                if left["hotel_id"] == right["hotel_id"]
+                and left["id"] < right["id"]]
+
+    eligible = [{"r1": left["id"], "r2": right["id"], "answer": True}
+                for left, right in same_hotel_pairs()
+                if left["id"] in kept and right["id"] in kept]
+    schema = pa.schema([("r1", pa.string()), ("r2", pa.string()),
                         ("answer", pa.bool_())])
     joins = {"join-1": pa.Table.from_pylist(eligible, schema=schema)}
     rows = rows_from_answers(spec, filters, joins, corpus_rows=tables)
     output = quail_b.RunOutput(filters, joins, rows, runtime_s=1.0)
     _validate_output(spec, output, tables)
-    assert all(len(answers) == 12 for answers in filters.values())
+    assert all(len(answers) == 8 for answers in filters.values())
     assert len(eligible) == len(rows) == len(complaints) * (len(complaints) - 1)
     if not eligible:
         return
-    left, right = next((left, right) for left in endpoints["a"]
-                       for right in endpoints["b"]
-                       if left["pair_id"] == right["pair_id"]
-                       and (left["id"] not in kept["a"]
-                            or right["id"] not in kept["b"]))
-    wrong = pa.table({"a": [left["id"]], "b": [right["id"]]})
+    left, right = next((left, right) for left, right in same_hotel_pairs()
+                       if left["id"] not in kept or right["id"] not in kept)
+    wrong = pa.table({"r1": [left["id"]], "r2": [right["id"]]})
     output.rows = pa.concat_tables([wrong, rows.slice(1)])
     with pytest.raises(ValueError, match="not implied"):
         _validate_output(spec, output, tables)

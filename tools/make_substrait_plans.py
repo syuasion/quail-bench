@@ -277,6 +277,8 @@ class Join:
         aliases: The relations the prompt's `{0}` and `{1}` refer to.
         prompt: The join prompt.
         on: Column pairs, in `aliases` order, that must also be equal.
+        comparisons: Other conditions, as (left column, comparison, right
+            column) in `aliases` order; for example ("id", "<", "id").
     """
 
     left: Scan | Filter | Join
@@ -284,6 +286,7 @@ class Join:
     aliases: tuple[str, str]
     prompt: str
     on: tuple[tuple[str, str], ...] = ()
+    comparisons: tuple[tuple[str, str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -581,9 +584,12 @@ class _Emitter:
             _field(fields.index((first, text[first]))),
             _field(fields.index((second, text[second]))),
         ])]
-        for left_column, right_column in node.on:
-            self.functions.update({EQUAL_NAME, AND_NAME})
-            conditions.append(_call(EQUAL_NAME, [
+        for left_column, comparison, right_column in (
+                *((column, "=", partner) for column, partner in node.on),
+                *node.comparisons):
+            name = _COMPARISONS[comparison]
+            self.functions.update({name, AND_NAME})
+            conditions.append(_call(name, [
                 _field(fields.index((first, left_column))),
                 _field(fields.index((second, right_column))),
             ]))
@@ -1483,13 +1489,14 @@ QUERIES = (
                    prompts.TA_2_DESCRIPTIONS),
           select=("r", "r.department"), draft=True),
     Query("TA-3", "two TA_3_1 complaint filters -> TA_3 join: unique "
-          "same-hotel pairs report the same problem",
-          Join(_filters(Scan("tripadvisor_pair_left", "a", "body", ("pair_id",)),
+          "same-hotel review pairs report the same problem",
+          Join(_filters(Scan("tripadvisor_reviews", "r1", "body", ("hotel_id",)),
                         prompts.TA_3_1),
-               _filters(Scan("tripadvisor_pair_right", "b", "body", ("pair_id",)),
+               _filters(Scan("tripadvisor_reviews", "r2", "body", ("hotel_id",)),
                         prompts.TA_3_1),
-               ("a", "b"), prompts.TA_3,
-               on=(("pair_id", "pair_id"),)), draft=True),
+               ("r1", "r2"), prompts.TA_3,
+               on=(("hotel_id", "hotel_id"),),
+               comparisons=(("id", "<", "id"),)), draft=True),
     Query("REL-TA-1", "REL_TA_1 score: top 10 reviews",
           Fetch(Sort(Score(_tripadvisor_reviews(), prompts.REL_TA_1,
                            "forced_move_score"),
