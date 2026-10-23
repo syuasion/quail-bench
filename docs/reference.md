@@ -738,7 +738,7 @@ minimum tokens, recomputed tokens, and KV regret.
 | Span accuracy | Extraction answers |
 | Fresh tokens | `measurements["fresh_tokens"]` |
 | Input tokens and their throughput | Prompt pieces, or reported input tokens |
-| Minimum tokens and KV regret, and both by text | All answer tables, score and extract answers included, prompt pieces, and fresh tokens |
+| Minimum tokens and KV regret | All answer tables, score and extract answers included, prompt pieces, and fresh tokens |
 | GPU cost | `gpu_count` and `gpu_hourly_rate_usd` |
 | Cost per million input tokens | GPU cost and a positive input token count |
 
@@ -813,9 +813,6 @@ made.
 | Minimum tokens | Input positions required with an unlimited prefix KV cache |
 | Recomputed tokens | Fresh tokens minus minimum tokens |
 | KV regret | Recomputed tokens divided by fresh tokens, as a percentage |
-| Minimum tokens by text | Minimum tokens, counting rows with the same text once |
-| Recomputed tokens by text | Fresh tokens minus minimum tokens by text |
-| KV regret by text | Recomputed tokens by text divided by fresh tokens, as a percentage |
 
 #### Input tokens
 
@@ -835,7 +832,9 @@ The minimum is the number of input tokens that the requests need when the KV of
 every prompt prefix stays in memory. It counts each distinct prompt prefix one
 time:
 
-- A document counts one time, however many questions ask about it.
+- A document counts one time, however many questions ask about it. Rows with
+  the same text count as one document, even under different IDs or tables,
+  because their prompts are the same.
 - If two questions about one document start with the same tokens, these tokens
   count one time.
 - In a join, the anchor document, the frame, and the partner label count one
@@ -876,22 +875,6 @@ are recomputed tokens:
 KV regret is recomputed tokens divided by fresh tokens, as a percentage. For
 example, an engine that computes 100 fresh tokens for requests with a minimum
 of 80 tokens has 20 recomputed tokens and a KV regret of 20%.
-
-#### Minimum tokens by text
-
-A table can hold the same text in several rows under different IDs. For
-example, a table of same-hotel review pairs holds each review in one row per
-pair. The minimum counts each row as its own document, so a question asked of
-50 copies of one review counts 50 times. An engine with a prefix cache over
-whole requests asks it once.
-
-The minimum by text counts rows with the same text as one document, even when
-their tables differ. Each copy still adds its own join partners. Recomputed
-tokens and KV regret by text follow from it as above.
-
-QUAIL-B reports both. An engine whose fresh tokens fall below the minimum asked
-a repeated text once: its recomputed tokens are zero, and the recomputed tokens
-by text measure its work. Fresh tokens below the minimum by text are an error.
 
 ### Cost
 

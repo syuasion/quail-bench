@@ -30,8 +30,6 @@ MEASUREMENT_SCHEMA = pa.schema([
     ("fresh_tokens", pa.int64()),
     ("minimum_tokens", pa.int64()),
     ("regret_tokens", pa.int64()),
-    ("minimum_tokens_by_text", pa.int64()),
-    ("regret_tokens_by_text", pa.int64()),
     ("regret_approximate", pa.bool_()),
     ("evaluated_document_pairs", pa.int64()),
     ("input_rows", pa.int64()),
@@ -47,7 +45,6 @@ MEASUREMENT_SCHEMA = pa.schema([
     ("cost_usd", pa.float64()),
     ("cost_usd_per_million_input_tokens", pa.float64()),
     ("kv_regret_percent", pa.float64()),
-    ("kv_regret_percent_by_text", pa.float64()),
 ])
 
 
@@ -68,14 +65,8 @@ def measurement_rows(record) -> list[dict]:
             when the engine did not report it.
         minimum_tokens: Distinct prefix positions those requests need with
             unlimited KV. Null without prompt pieces and answers.
-        regret_tokens: `fresh_tokens` minus `minimum_tokens`, or zero when
-            the engine asked a repeated text once. The KV the engine
-            computed again. Null when either side is null.
-        minimum_tokens_by_text: The minimum with rows of the same text
-            counted as one document, whatever their ids or tables.
-        regret_tokens_by_text: `fresh_tokens` minus
-            `minimum_tokens_by_text`. It counts a question asked again of
-            a repeated text.
+        regret_tokens: `fresh_tokens` minus `minimum_tokens`. The KV the
+            engine computed again. Null when either side is null.
         regret_approximate: True when the engine tokenized full prompts
             itself, so the minimum is scaled to the engine's token count.
         evaluated_document_pairs: Join pairs the engine asked, summed
@@ -101,7 +92,6 @@ def measurement_rows(record) -> list[dict]:
             times one million. Null without cost or positive input tokens.
         kv_regret_percent: Recomputed tokens divided by fresh tokens, times
             100. Null without regret or positive fresh tokens.
-        kv_regret_percent_by_text: The same, from `regret_tokens_by_text`.
     """
     rows = []
     for item in record["queries"]:
@@ -121,8 +111,6 @@ def measurement_rows(record) -> list[dict]:
             "fresh_tokens": metrics["fresh_tokens"],
             "minimum_tokens": metrics["minimum_tokens"],
             "regret_tokens": metrics["regret_tokens"],
-            "minimum_tokens_by_text": metrics.get("minimum_tokens_by_text"),
-            "regret_tokens_by_text": metrics.get("regret_tokens_by_text"),
             "regret_approximate": metrics.get("regret_approximate", False),
             "evaluated_document_pairs": metrics["evaluated_document_pairs"],
             "input_rows": sum(metrics["input_rows"].values()),
@@ -140,7 +128,6 @@ def measurement_rows(record) -> list[dict]:
             "cost_usd_per_million_input_tokens": metrics.get(
                 "cost_usd_per_million_input_tokens"),
             "kv_regret_percent": metrics.get("kv_regret_percent"),
-            "kv_regret_percent_by_text": metrics.get("kv_regret_percent_by_text"),
         })
     return rows
 
@@ -214,9 +201,9 @@ def _write_report(directory, record):
     lines.extend([
         "", "## Input rows and token counts", "",
         "| Query | Input rows by alias | Input tokens | Fresh tokens | "
-        "Minimum tokens | Recomputed KV tokens | Minimum tokens by text | "
-        "Recomputed KV tokens by text |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "Minimum tokens | "
+        "Recomputed KV tokens |",
+        "| --- | --- | ---: | ---: | ---: | ---: |",
     ])
     for item in record["queries"]:
         metrics = item.get("metrics", {})
@@ -227,9 +214,7 @@ def _write_report(directory, record):
             f"{_number(metrics.get('input_tokens'))} | "
             f"{_number(metrics.get('fresh_tokens'))} | "
             f"{_number(metrics.get('minimum_tokens'))} | "
-            f"{_number(metrics.get('regret_tokens'))} | "
-            f"{_number(metrics.get('minimum_tokens_by_text'))} | "
-            f"{_number(metrics.get('regret_tokens_by_text'))} |")
+            f"{_number(metrics.get('regret_tokens'))} |")
     lines.extend(["", "## Configuration", "", "```json",
                   json.dumps(record["metadata"], indent=2), "```", ""])
     failures = [item for item in record["queries"] if "error" in item]

@@ -17,10 +17,9 @@ beyond the minimum is its regret, whatever the cause: an evicted
 anchor computed again, a set scanned twice under two aliases, or a
 prompt prefix the documents share computed once per document.
 
-Rows with the same text under different ids hold equal prefixes, so a
-prefix cache over whole requests computes their questions once. The
-minimum by text counts them as one document, whatever their ids or
-tables; the minimum counts each row's own. Both are reported.
+Rows with the same text hold equal prefixes, so a prefix cache over
+whole requests computes their questions once. The minimum counts them
+as one document, whatever their ids or tables.
 
 The minimum does not depend on how an engine reads a label. A
 classification's tail is the reference prompt's: the question, the
@@ -339,10 +338,11 @@ def _encoded(column) -> tuple[np.ndarray, pa.Array]:
 def minimum_input_tokens(spec, pieces, filter_answers, join_answers,
                          documents: DocumentTokens,
                          classify_answers=None, score_answers=None,
-                         extract_answers=None, by_text=False) -> int:
+                         extract_answers=None) -> int:
     """Return the fewest input tokens the run's requests need.
 
-    A join can hold tens of millions of pairs, so the pairs are
+    Rows with the same text are one document, whatever their ids or
+    tables. A join can hold tens of millions of pairs, so the pairs are
     grouped by anchor in numpy; Python visits documents and anchors.
 
     Args:
@@ -360,8 +360,6 @@ def minimum_input_tokens(spec, pieces, filter_answers, join_answers,
             alias column, one row per document scored.
         extract_answers: Extract operator ID to a table with the
             relation's alias column, one row per document read.
-        by_text: Whether rows with the same text are one document,
-            whatever their ids or tables.
 
     Returns:
         The token count.
@@ -466,13 +464,11 @@ def minimum_input_tokens(spec, pieces, filter_answers, join_answers,
     total = prefix_trie_size(
         np.concatenate((pre, documents[(*table_set, row_id)]))
         for table_set, row_id in records)
-    if by_text:
-        records = _merged_by_text(records, documents)
     suffix_sizes: dict = {}
     partner_sizes: dict = {}
     partner_tries: dict = {}
     partners = frozenset().union(*members_of.values())
-    for document in records.values():
+    for document in _merged_by_text(records, documents).values():
         suffixes = frozenset(document.suffixes)
         if suffixes not in suffix_sizes:
             suffix_sizes[suffixes] = prefix_trie_size(suffixes)
@@ -595,10 +591,6 @@ def token_metrics(spec, output, corpus_rows, stores=None) -> dict:
       `regret_approximate` is True.
     - Without prompt pieces, use the engine's input-token total. Minimum
       and regret are unavailable because a total does not describe prefixes.
-    - The minimum and regret by text count rows with the same text as one
-      document; they follow the same rules. Fresh tokens below the minimum
-      by text are an error. Fresh tokens below the minimum, when an engine
-      asks a repeated text once, give zero regret.
     - A missing answer table makes input tokens unavailable. An empty answer
       table contributes zero input tokens.
 
@@ -614,7 +606,6 @@ def token_metrics(spec, output, corpus_rows, stores=None) -> dict:
     if output.prompt_pieces is None:
         return {"input_tokens": reported_input, "fresh_tokens": fresh,
                 "minimum_tokens": None, "regret_tokens": None,
-                "minimum_tokens_by_text": None, "regret_tokens_by_text": None,
                 "regret_approximate": False}
     if fresh is None:
         raise ValueError("prompt pieces need a fresh_tokens measurement")
@@ -635,29 +626,20 @@ def token_metrics(spec, output, corpus_rows, stores=None) -> dict:
                output.classify_answers, output.score_answers,
                output.extract_answers)
     minimum = minimum_input_tokens(spec, pieces, *answers)
-    by_text = minimum_input_tokens(spec, pieces, *answers, by_text=True)
     piece_input = input_tokens(spec, pieces, *answers)
     if reported_input is not None:
         if piece_input:
             minimum = round(minimum * reported_input / piece_input)
-            by_text = round(by_text * reported_input / piece_input)
         return {"input_tokens": reported_input, "fresh_tokens": fresh,
                 "minimum_tokens": minimum,
                 "regret_tokens": max(fresh - minimum, 0),
-                "minimum_tokens_by_text": by_text,
-                "regret_tokens_by_text": max(fresh - by_text, 0),
                 "regret_approximate": True}
-    if fresh < by_text:
+    if fresh < minimum:
         raise ValueError(
             f"fresh_tokens ({fresh}) is below the minimum the requests need "
-            f"({by_text})")
-    # an engine that asks a repeated text once computes less than the
-    # minimum; its regret is zero, and the regret by text measures it
+            f"({minimum})")
     return {
         "input_tokens": piece_input,
         "fresh_tokens": fresh, "minimum_tokens": minimum,
-        "regret_tokens": max(fresh - minimum, 0),
-        "minimum_tokens_by_text": by_text,
-        "regret_tokens_by_text": fresh - by_text,
-        "regret_approximate": False,
+        "regret_tokens": fresh - minimum, "regret_approximate": False,
     }

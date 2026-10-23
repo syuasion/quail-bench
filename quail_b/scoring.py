@@ -52,7 +52,7 @@ class RunOutput:
             `quail_b.minimum.validate_prompt_pieces` describes, or None.
             With the answers and `fresh_tokens`, scoring fills
             `input_tokens`, `input_tokens_per_second`, `minimum_tokens`,
-            `regret_tokens`, and the minimum and regret by text.
+            and `regret_tokens`.
         classify_answers: Classify operator ID to a table with the
             relation's alias column, the partner's alias column for a
             classification of joined rows, and a string `label`
